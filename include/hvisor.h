@@ -68,8 +68,8 @@ typedef struct ioctl_zone_list_args zone_list_args_t;
 
 #ifdef LOONGARCH64
 
-#define HVISOR_CLEAR_INJECT_IRQ _IO(1, 6) // used for ioctl
-#define HVISOR_HC_CLEAR_INJECT_IRQ 5 // hvcall code in hvisor
+#define HVISOR_CLEAR_INJECT_IRQ _IO(1, 50) // used for ioctl
+#define HVISOR_HC_CLEAR_INJECT_IRQ 50 // hvcall code in hvisor
 
 #endif /* LOONGARCH64 */
 

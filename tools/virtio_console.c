@@ -20,7 +20,7 @@ ConsoleDev *init_console_dev() {
 
 #ifdef LOONGARCH64
 double last_process_timestamp = -1;
-const int LOONGARCH64_CONSOLE_PROCESS_INTERVAL_MS = 500;
+const int LOONGARCH64_CONSOLE_PROCESS_INTERVAL_MS = 400;
 #endif
 
 static void virtio_console_event_handler(int fd, int epoll_type, void *param) {
