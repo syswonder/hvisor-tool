@@ -136,26 +136,58 @@ static int parse_arch_config(cJSON *root, zone_config_t *config) {
     cJSON *gicd_base_json = cJSON_GetObjectItem(arch_config_json, "gicd_base");
     cJSON *gicr_base_json = cJSON_GetObjectItem(arch_config_json, "gicr_base");
     cJSON *gits_base_json = cJSON_GetObjectItem(arch_config_json, "gits_base");
+    cJSON *gicc_base_json = cJSON_GetObjectItem(arch_config_json, "gicc_base");
+    cJSON *gich_base_json = cJSON_GetObjectItem(arch_config_json, "gich_base");
+    cJSON *gicv_base_json = cJSON_GetObjectItem(arch_config_json, "gicv_base");
+    cJSON *gicc_offset_json = cJSON_GetObjectItem(arch_config_json, "gicc_offset");
+    cJSON *gicv_size_json = cJSON_GetObjectItem(arch_config_json, "gicv_size");
+    cJSON *gich_size_json = cJSON_GetObjectItem(arch_config_json, "gich_size");
+    cJSON *gicc_size_json = cJSON_GetObjectItem(arch_config_json, "gicc_size");
     cJSON *gicd_size_json = cJSON_GetObjectItem(arch_config_json, "gicd_size");
     cJSON *gicr_size_json = cJSON_GetObjectItem(arch_config_json, "gicr_size");
     cJSON *gits_size_json = cJSON_GetObjectItem(arch_config_json, "gits_size");
 
     CHECK_JSON_NULL(gicd_base_json, "gicd_base")
     CHECK_JSON_NULL(gicr_base_json, "gicr_base")
+    CHECK_JSON_NULL(gicc_base_json, "gicc_base")
+    CHECK_JSON_NULL(gich_base_json, "gich_base")
+    CHECK_JSON_NULL(gicv_base_json, "gicv_base")
+    CHECK_JSON_NULL(gicc_offset_json, "gicc_offset")
+    CHECK_JSON_NULL(gicv_size_json, "gicv_size")
+    CHECK_JSON_NULL(gich_size_json, "gich_size")
+    CHECK_JSON_NULL(gicc_size_json, "gicc_size")
     CHECK_JSON_NULL(gicd_size_json, "gicd_size")
     CHECK_JSON_NULL(gicr_size_json, "gicr_size")
-
+    
     if (gits_base_json == NULL || gits_size_json == NULL) {
         printf("No gits fields in arch_config.\n");
     } else {
         config->arch_config.gits_base = strtoull(gits_base_json->valuestring, NULL, 16);
         config->arch_config.gits_size = strtoull(gits_size_json->valuestring, NULL, 16);
     }
-
+    fprintf(stderr,"###############################################\n");
     config->arch_config.gicd_base = strtoull(gicd_base_json->valuestring, NULL, 16);
+    fprintf(stderr,"gicd_base: %llx\n", config->arch_config.gicd_base);
     config->arch_config.gicr_base = strtoull(gicr_base_json->valuestring, NULL, 16);
+    fprintf(stderr,"gicr_base: %llx\n", config->arch_config.gicr_base);
+    config->arch_config.gicc_base = strtoull(gicc_base_json->valuestring, NULL, 16);
+    fprintf(stderr,"gicc_base: %llx\n", config->arch_config.gicc_base);
+    config->arch_config.gich_base = strtoull(gich_base_json->valuestring, NULL, 16);
+    fprintf(stderr,"gich_base: %llx\n", config->arch_config.gich_base);
+    config->arch_config.gicv_base = strtoull(gicv_base_json->valuestring, NULL, 16);
+    fprintf(stderr,"gicv_base: %llx\n", config->arch_config.gicv_base);
+    config->arch_config.gicc_offset = strtoull(gicc_offset_json->valuestring, NULL, 16);
+    fprintf(stderr,"gicc_offset: %llx\n", config->arch_config.gicc_offset);
+    config->arch_config.gicv_size = strtoull(gicv_size_json->valuestring, NULL, 16);
+    fprintf(stderr,"gicv_size: %llx\n", config->arch_config.gicv_size);
+    config->arch_config.gich_size = strtoull(gich_size_json->valuestring, NULL, 16);
+    fprintf(stderr,"gich_size: %llx\n", config->arch_config.gich_size);
+    config->arch_config.gicc_size = strtoull(gicc_size_json->valuestring, NULL, 16);
+    fprintf(stderr,"gicc_size: %llx\n", config->arch_config.gicc_size);
     config->arch_config.gicd_size = strtoull(gicd_size_json->valuestring, NULL, 16);
+    fprintf(stderr,"gicd_size: %llx\n", config->arch_config.gicd_size);
     config->arch_config.gicr_size = strtoull(gicr_size_json->valuestring, NULL, 16);
+    fprintf(stderr,"gicr_size: %llx\n", config->arch_config.gicr_size);
 #endif
 
 #ifdef RISCV64

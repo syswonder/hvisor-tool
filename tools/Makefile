@@ -15,7 +15,7 @@ else
 endif
 
 ifeq ($(ARCH), arm64)
-	CC := aarch64-linux-gnu-gcc
+	CC := aarch64-none-linux-gnu-gcc
 else ifeq ($(ARCH), riscv)
 	CC := riscv64-linux-gnu-gcc
 endif
