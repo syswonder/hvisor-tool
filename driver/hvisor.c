@@ -9,6 +9,7 @@
  *      Guowei Li <2401213322@stu.pku.edu.cn>
  */
 #include <asm/cacheflush.h>
+#include <linux/clk.h>
 #include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -18,6 +19,7 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_clk.h>
 #include <linux/of_irq.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/sched/signal.h>
@@ -33,6 +35,7 @@
 struct virtio_bridge *virtio_bridge;
 int virtio_irq = -1;
 static struct task_struct *task = NULL;
+struct clk **clks;
 
 // initial virtio el2 shared region
 static int hvisor_init_virtio(void) {
@@ -319,8 +322,9 @@ static irqreturn_t virtio_irq_handler(int irq, void *dev_id) {
 ** Module Init function
 */
 static int __init hvisor_init(void) {
-    int err;
+    int err = 0, i = 0;
     struct device_node *node = NULL;
+    int clock_count = 0;
     err = misc_register(&hvisor_misc_dev);
     if (err) {
         pr_err("hvisor_misc_register failed!!!\n");
@@ -344,14 +348,42 @@ static int __init hvisor_init(void) {
     err = request_irq(virtio_irq, virtio_irq_handler,
                       IRQF_SHARED | IRQF_TRIGGER_RISING, "hvisor_virtio_device",
                       &hvisor_misc_dev);
-    if (err)
-        goto err_out;
+
+    if (err) {
+        pr_err("hvisor cannot register IRQ, err is %d\n", err);
+        goto irq_err_out;
+    }
+
+    clock_count = of_count_phandle_with_args(node, "clocks", "#clock-cells");
+    if (clock_count <= 0) {
+        pr_info("hvisor cannot get clk, may clocks are unnecessary");
+    } else {
+        clks = kcalloc(clock_count, sizeof(*clks), GFP_KERNEL);
+        if (!clks) {
+            goto clock_err_out;
+        }
+
+        for (i = 0; i < clock_count; i++) {
+            clks[i] = of_clk_get(node, i);
+            if (IS_ERR(clks[i])) {
+                goto clock_err_out;
+            }
+
+            err = clk_prepare_enable(clks[i]);
+            if (err) {
+                goto clock_err_out;
+            }
+        }
+    }
 
     of_node_put(node);
     pr_info("hvisor init done!!!\n");
     return 0;
-err_out:
-    pr_err("hvisor cannot register IRQ, err is %d\n", err);
+clock_err_out:
+    if (clks != NULL) {
+        kfree(clks);
+    }
+irq_err_out:
     if (virtio_irq != -1)
         free_irq(virtio_irq, &hvisor_misc_dev);
     misc_deregister(&hvisor_misc_dev);
@@ -362,6 +394,9 @@ err_out:
 ** Module Exit function
 */
 static void __exit hvisor_exit(void) {
+    if (clks != NULL) {
+        kfree(clks);
+    }
     if (virtio_irq != -1)
         free_irq(virtio_irq, &hvisor_misc_dev);
     if (virtio_bridge != NULL) {
