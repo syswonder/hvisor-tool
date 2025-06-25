@@ -52,7 +52,7 @@ struct pci_config {
 typedef struct pci_config pci_config_t;
 
 #ifdef ARM64
-struct Gicv2Config{
+struct Gicv2Config {
     __u64 gicd_base;
     __u64 gicd_size;
     __u64 gicc_base;
@@ -64,7 +64,7 @@ struct Gicv2Config{
     __u64 gicv_size;
 };
 
-struct Gicv3Config{
+struct Gicv3Config {
     __u64 gicd_base;
     __u64 gicd_size;
     __u64 gicr_base;
@@ -90,7 +90,7 @@ union GicConfig {
 
 struct arch_zone_config {
     __u64 gic_version;
-    union GicConfig gic_config; 
+    union GicConfig gic_config;
 };
 #endif
 
