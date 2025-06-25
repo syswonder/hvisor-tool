@@ -21,7 +21,7 @@
 #define CONFIG_MAX_INTERRUPTS 32
 #define CONFIG_MAX_ZONES 32
 #define CONFIG_NAME_MAXLEN 32
-#define CONFIG_MAX_PCI_DEV 16
+#define CONFIG_MAX_PCI_DEV 32
 
 #define IVC_PROTOCOL_USER 0x0
 #define IVC_PROTOCOL_HVISOR 0x01
@@ -52,24 +52,6 @@ struct pci_config {
 typedef struct pci_config pci_config_t;
 
 #ifdef ARM64
-// struct arch_zone_config {
-//     __u64 gicd_base;
-//     __u64 gicd_size;
-//     __u64 gicr_base;
-//     __u64 gicr_size;
-//     __u64 gits_base;
-//     __u64 gits_size;
-//     __u64 gicc_base;
-//     __u64 gicc_offset;
-//     __u64 gicc_size;
-//     __u64 gich_base;
-//     __u64 gich_size;
-//     __u64 gicv_base;
-//     __u64 gicv_size;
-// };
-
-// enum class GicVesionTag: __u64 { v2, v3 };
-
 struct Gicv2Config{
     __u64 gicd_base;
     __u64 gicd_size;
