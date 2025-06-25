@@ -231,7 +231,6 @@ static int parse_arch_config(cJSON *root, zone_config_t *config) {
             strtoull(gicr_base_json->valuestring, NULL, 16);
         config->arch_config.gic_config.gicv3.gicv3_config.gicr_size =
             strtoull(gicr_size_json->valuestring, NULL, 16);
-        
         if (gits_base_json == NULL || gits_size_json == NULL) {
             log_warn("No gits fields in arch_config.\n");
         } else {
