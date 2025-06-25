@@ -95,6 +95,18 @@ int open_dev() {
     return fd;
 }
 
+// static void get_info(char *optarg, char **path, u64 *address) {
+// 	char *now;
+// 	*path = strtok(optarg, ",");
+// 	now = strtok(NULL, "=");
+// 	if (strcmp(now, "addr") == 0) {
+// 		now = strtok(NULL, "=");
+// 		*address = strtoull(now, NULL, 16);
+// 	} else {
+// 		help(1);
+// 	}
+// }
+
 static __u64 load_image_to_memory(const char *path, __u64 load_paddr) {
     if (strcmp(path, "null") == 0) {
         return 0;
@@ -183,56 +195,67 @@ static int parse_arch_config(cJSON *root, zone_config_t *config) {
         SAFE_CJSON_GET_OBJECT_ITEM(arch_config_json, "gicr_size");
     cJSON *gits_size_json =
         SAFE_CJSON_GET_OBJECT_ITEM(arch_config_json, "gits_size");
-    CHECK_JSON_NULL(gic_version_json, "gic_version");
-    CHECK_JSON_NULL(gicd_base_json, "gicd_base")
-    CHECK_JSON_NULL(gicr_base_json, "gicr_base")
-    CHECK_JSON_NULL(gicd_size_json, "gicd_size")
-    CHECK_JSON_NULL(gicr_size_json, "gicr_size")
-
     char *gic_version = gic_version_json->valuestring;
     if (!strcmp(gic_version, "v2")) {
+        CHECK_JSON_NULL(gic_version_json, "gic_version")
+        CHECK_JSON_NULL(gicd_base_json, "gicd_base")
+        CHECK_JSON_NULL(gicd_size_json, "gicd_size")
         CHECK_JSON_NULL(gicc_base_json, "gicc_base")
-        CHECK_JSON_NULL(gich_base_json, "gich_base")
-        CHECK_JSON_NULL(gicv_base_json, "gicv_base")
-        CHECK_JSON_NULL(gicc_offset_json, "gicc_offset")
-        CHECK_JSON_NULL(gicv_size_json, "gicv_size")
-        CHECK_JSON_NULL(gich_size_json, "gich_size")
         CHECK_JSON_NULL(gicc_size_json, "gicc_size")
-        config->arch_config.gicc_base =
+        CHECK_JSON_NULL(gicc_offset_json, "gicc_offset")
+        CHECK_JSON_NULL(gich_base_json, "gich_base")
+        CHECK_JSON_NULL(gich_size_json, "gich_size")
+        CHECK_JSON_NULL(gicv_base_json, "gicv_base")
+        CHECK_JSON_NULL(gicv_size_json, "gicv_size")
+        config->arch_config.gic_version = 2;
+        config->arch_config.gic_config.gicv2.gic_version_tag = 0;
+        config->arch_config.gic_config.gicv2.gicv2_config.gicd_base =
+            strtoull(gicd_base_json->valuestring, NULL, 16);
+        config->arch_config.gic_config.gicv2.gicv2_config.gicd_size =
+            strtoull(gicd_size_json->valuestring, NULL, 16);
+        config->arch_config.gic_config.gicv2.gicv2_config.gicc_base =
             strtoull(gicc_base_json->valuestring, NULL, 16);
-        config->arch_config.gich_base =
-            strtoull(gich_base_json->valuestring, NULL, 16);
-        config->arch_config.gicv_base =
-            strtoull(gicv_base_json->valuestring, NULL, 16);
-        config->arch_config.gicc_offset =
-            strtoull(gicc_offset_json->valuestring, NULL, 16);
-        config->arch_config.gicv_size =
-            strtoull(gicv_size_json->valuestring, NULL, 16);
-        config->arch_config.gich_size =
-            strtoull(gich_size_json->valuestring, NULL, 16);
-        config->arch_config.gicc_size =
+        config->arch_config.gic_config.gicv2.gicv2_config.gicc_size =
             strtoull(gicc_size_json->valuestring, NULL, 16);
-    } else if (strcmp(gic_version, "v3") != 0) {
+        config->arch_config.gic_config.gicv2.gicv2_config.gicc_offset =
+            strtoull(gicc_offset_json->valuestring, NULL, 16);
+        config->arch_config.gic_config.gicv2.gicv2_config.gich_base =
+            strtoull(gich_base_json->valuestring, NULL, 16);
+        config->arch_config.gic_config.gicv2.gicv2_config.gich_size =
+            strtoull(gich_size_json->valuestring, NULL, 16);
+        config->arch_config.gic_config.gicv2.gicv2_config.gicv_base =
+            strtoull(gicv_base_json->valuestring, NULL, 16);
+        config->arch_config.gic_config.gicv2.gicv2_config.gicv_size =
+            strtoull(gicv_size_json->valuestring, NULL, 16);
+    } else if (!strcmp(gic_version, "v3")) {
+        CHECK_JSON_NULL(gic_version_json, "gic_version")
+        CHECK_JSON_NULL(gicd_base_json, "gicd_base")
+        CHECK_JSON_NULL(gicr_base_json, "gicr_base")
+        CHECK_JSON_NULL(gicd_size_json, "gicd_size")
+        CHECK_JSON_NULL(gicr_size_json, "gicr_size")
+        config->arch_config.gic_version = 3;
+        config->arch_config.gic_config.gicv3.gic_version_tag = 1;
+        config->arch_config.gic_config.gicv3.gicv3_config.gicd_base =
+            strtoull(gicd_base_json->valuestring, NULL, 16);
+        config->arch_config.gic_config.gicv3.gicv3_config.gicd_size =
+            strtoull(gicd_size_json->valuestring, NULL, 16);
+        config->arch_config.gic_config.gicv3.gicv3_config.gicr_base =
+            strtoull(gicr_base_json->valuestring, NULL, 16);
+        config->arch_config.gic_config.gicv3.gicv3_config.gicr_size =
+            strtoull(gicr_size_json->valuestring, NULL, 16);
+        
+        if (gits_base_json == NULL || gits_size_json == NULL) {
+            log_warn("No gits fields in arch_config.\n");
+        } else {
+            config->arch_config.gic_config.gicv3.gicv3_config.gits_base =
+                strtoull(gits_base_json->valuestring, NULL, 16);
+            config->arch_config.gic_config.gicv3.gicv3_config.gits_size =
+                strtoull(gits_size_json->valuestring, NULL, 16);
+        }
+    } else {
         log_error("Invalid GIC version. It should be either of v2 or v3\n");
         return -1;
     }
-    if (gits_base_json == NULL || gits_size_json == NULL) {
-        log_warn("No gits fields in arch_config.\n");
-    } else {
-        config->arch_config.gits_base =
-            strtoull(gits_base_json->valuestring, NULL, 16);
-        config->arch_config.gits_size =
-            strtoull(gits_size_json->valuestring, NULL, 16);
-    }
-
-    config->arch_config.gicd_base =
-        strtoull(gicd_base_json->valuestring, NULL, 16);
-    config->arch_config.gicr_base =
-        strtoull(gicr_base_json->valuestring, NULL, 16);
-    config->arch_config.gicd_size =
-        strtoull(gicd_size_json->valuestring, NULL, 16);
-    config->arch_config.gicr_size =
-        strtoull(gicr_size_json->valuestring, NULL, 16);
 #endif
 
 #ifdef RISCV64
@@ -272,11 +295,9 @@ static int parse_pci_config(cJSON *root, zone_config_t *config) {
     if (pci_config_json == NULL) {
         log_warn("No pci_config field found.");
         return -1;
-    } else {
-        printf("pci_config field found.\n");
     }
 
-#if defined(ARM64) || defined(LOONGARCH64)
+#ifdef ARM64
     cJSON *ecam_base_json =
         SAFE_CJSON_GET_OBJECT_ITEM(pci_config_json, "ecam_base");
     cJSON *io_base_json =
@@ -341,6 +362,7 @@ static int parse_pci_config(cJSON *root, zone_config_t *config) {
             SAFE_CJSON_GET_ARRAY_ITEM(alloc_pci_devs_json, i)->valueint;
     }
 #endif
+
     return 0;
 }
 
@@ -528,15 +550,14 @@ static int zone_start_from_json(const char *json_config_path,
     log_info("Zone name: %s", config->name);
 
 #ifndef LOONGARCH64
+
     // Parse architecture-specific configurations (interrupts for each platform)
     if (parse_arch_config(root, config))
         goto err_out;
 
-        // parse_pci_config(root, config);
+    parse_pci_config(root, config);
 
 #endif
-
-    parse_pci_config(root, config);
 
     if (root)
         cJSON_Delete(root);
@@ -674,9 +695,6 @@ int main(int argc, char *argv[]) {
         help(1);
 
     if (strcmp(argv[1], "zone") == 0) {
-        if (argc < 3)
-            help(1);
-
         if (strcmp(argv[2], "start") == 0) {
             err = zone_start(argc, argv);
         } else if (strcmp(argv[2], "shutdown") == 0) {
@@ -687,9 +705,6 @@ int main(int argc, char *argv[]) {
             help(1);
         }
     } else if (strcmp(argv[1], "virtio") == 0) {
-        if (argc < 3)
-            help(1);
-
         if (strcmp(argv[2], "start") == 0) {
             err = virtio_start(argc, argv);
         } else {
