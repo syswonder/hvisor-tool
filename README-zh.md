@@ -145,3 +145,68 @@ nohup ./hvisor virtio start virtio_cfg.json &
 ```
 pkill hvisor-virtio
 ```
+
+### CLOCK初始化
+clock初始化实际上是借用zone0的时钟框架对其他zone的时钟进行初始化的工具。要使用clock初始化，需要在`hvisor_virtio_device`中新增clock相关信息，这些clock信息实际上和实际设备使用的clock一致，这里的clock只是作为一个例子，实际设备使用的时钟需要根据具体设备调整。
+
+
+```dts
+// uart4: serial@fe680000 {
+//     clocks = <0x20 0x12b 0x20 0x128>;
+//     clock-names = "baudclk\0apb_pclk";
+//     ...
+// };
+
+hvisor_virtio_device {
+    compatible = "hvisor";
+    interrupt-parent = <0x01>;
+    interrupts = <0x00 0x20 0x01>;
+    clocks = <0x20 0x12b 0x20 0x128>;
+    // clocks = <&clock_controller clock_id>;
+    clock-names = "baudclk\0apb_pclk";
+    // clock-names = "clock_name";
+};
+```
+
+为了在作为zone1的linux中使用该设备，也需要对设备树进行对应的调整
+
+```dts
+clock@1 {
+    compatible = "fixed-clock";
+    #clock-cells = <0x00>;
+    clock-frequency = <24000000>;
+    clock-output-names = "SCLK_UART4";
+    phandle = <0x500>;
+};
+
+clock@2 {
+    compatible = "fixed-clock";
+    #clock-cells = <0x00>;
+    clock-frequency = <99000000>;
+    clock-output-names = "PCLK_UART4";
+    phandle = <0x501>;
+};
+
+uart4: serial@fe680000 {
+    clocks = <0x500 0x501>;
+    clock-names = "baudclk\0apb_pclk";
+    ...
+};
+```
+
+其中`phandle`只需要保证不和其他设备重复即可。从uart4的dts中发现，需要使用的时钟编号为`0x12b`和`0x128`，在`kernel_dir/include/dt-bindings/clock/xx.h`中可以查询得到该时钟编号对应的时钟名称`clock-output-names`
+
+```c
+#define PCLK_UART4		296
+#define SCLK_UART4		299
+```
+
+启动linux，可以通过查看`/sys/kernel/debug/clk/clk_summary`获取对应时钟的`clock-frequency`
+
+```shell
+                  enable  prepare  protect                                duty
+   clock          count    count    count    rate         accuracy phase  cycle
+-------------------------------------------------------------------------------
+pclk_uart4            1        1        0    99000000          0     0  50000
+sclk_uart4            0        0        0    24000000          0     0  50000
+```

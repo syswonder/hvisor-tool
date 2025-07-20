@@ -145,3 +145,68 @@ To shut down the Virtio daemon and all the created devices, execute the followin
 ```
 pkill hvisor-virtio
 ``` 
+
+### CLOCK初始化
+The clock initialization is essentially a tool that leverages the clock framework of zone0 to initialize the clocks of other zones. To use clock initialization, it is necessary to add clock-related information to `hvisor_virtio_device`. These clock entries are actually consistent with those used by the real device. The clocks here serve merely as an example — the actual clocks used by the device should be adjusted according to the specific hardware requirements.
+
+
+```dts
+// uart4: serial@fe680000 {
+//     clocks = <0x20 0x12b 0x20 0x128>;
+//     clock-names = "baudclk\0apb_pclk";
+//     ...
+// };
+
+hvisor_virtio_device {
+    compatible = "hvisor";
+    interrupt-parent = <0x01>;
+    interrupts = <0x00 0x20 0x01>;
+    clocks = <0x20 0x12b 0x20 0x128>;
+    // clocks = <&clock_controller clock_id>;
+    clock-names = "baudclk\0apb_pclk";
+    // clock-names = "clock_name";
+};
+```
+
+To use the device in Linux running as zone1, corresponding adjustments also need to be made to the device tree.
+
+```dts
+clock@1 {
+    compatible = "fixed-clock";
+    #clock-cells = <0x00>;
+    clock-frequency = <24000000>;
+    clock-output-names = "SCLK_UART4";
+    phandle = <0x500>;
+};
+
+clock@2 {
+    compatible = "fixed-clock";
+    #clock-cells = <0x00>;
+    clock-frequency = <99000000>;
+    clock-output-names = "PCLK_UART4";
+    phandle = <0x501>;
+};
+
+uart4: serial@fe680000 {
+    clocks = <0x500 0x501>;
+    clock-names = "baudclk\0apb_pclk";
+    ...
+};
+```
+
+The `phandle` only needs to be unique and not conflict with other devices. From the DTS of uart4, it was found that the required clock IDs are `0x12b` and `0x128`. You can look up the corresponding clock names for these IDs under `clock-output-names` in `kernel_dir/include/dt-bindings/clock/xx.h`.
+
+```c
+#define PCLK_UART4		296
+#define SCLK_UART4		299
+```
+
+After booting Linux, you can obtain the `clock-frequency` of the corresponding clocks by checking `/sys/kernel/debug/clk/clk_summary`.
+
+```shell
+                  enable  prepare  protect                                duty
+   clock          count    count    count    rate         accuracy phase  cycle
+-------------------------------------------------------------------------------
+pclk_uart4            1        1        0    99000000          0     0  50000
+sclk_uart4            0        0        0    24000000          0     0  50000
+```
