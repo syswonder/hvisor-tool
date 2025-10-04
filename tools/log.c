@@ -59,17 +59,16 @@ static const char *level_colors[] = {"\x1b[94m", "\x1b[36m", "\x1b[32m",
 
 static void stdout_callback(log_Event *ev, int with_enter) {
     char buf[16];
-    // put ev->time as a string into buf
     buf[strftime(buf, sizeof(buf), "%H:%M:%S", ev->time)] = '\0';
 
     if (with_enter) {
 #ifdef LOG_USE_COLOR
-        fprintf(ev->udata, "%s %s%-5s\x1b[0m \x1b[90m%s:%d:\x1b[0m ", buf,
+        fprintf(ev->udata, "%s %s%-5s\x1b[0m \x1b[90m%s:%d %s():\x1b[0m ", buf,
                 level_colors[ev->level], level_strings[ev->level], ev->file,
-                ev->line);
+                ev->line, ev->func);
 #else
-        fprintf(ev->udata, "%s %-5s %s:%d: ", buf, level_strings[ev->level],
-                ev->file, ev->line);
+        fprintf(ev->udata, "%s %-5s %s:%d %s(): ", buf, level_strings[ev->level],
+                ev->file, ev->line, ev->func);
 #endif
     }
 
@@ -82,8 +81,8 @@ static void stdout_callback(log_Event *ev, int with_enter) {
 static void file_callback(log_Event *ev) {
     char buf[64];
     buf[strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", ev->time)] = '\0';
-    fprintf(ev->udata, "%s %-5s %s:%d: ", buf, level_strings[ev->level],
-            ev->file, ev->line);
+    fprintf(ev->udata, "%s %-5s %s:%d %s(): ", buf, level_strings[ev->level],
+            ev->file, ev->line, ev->func);
     vfprintf(ev->udata, ev->fmt, ev->ap);
     fprintf(ev->udata, "\n");
     fflush(ev->udata);
@@ -135,7 +134,7 @@ static void init_event(log_Event *ev, void *udata) {
 }
 
 void log_log(int with_enter, int level, const char *file, int line,
-             const char *fmt, ...) {
+             const char *func, const char *fmt, ...) {
     if (L.quiet || level < L.level) {
         return;
     }
@@ -143,6 +142,7 @@ void log_log(int with_enter, int level, const char *file, int line,
     log_Event ev = {
         .fmt = fmt,
         .file = file,
+        .func = func,
         .line = line,
         .level = level,
     };

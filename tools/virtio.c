@@ -323,7 +323,7 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
             vqs[i].queue_num_max = VIRTQUEUE_SCMI_MAX_SIZE;
             vqs[i].dev = vdev;
         }
-        vqs[SCMI_QUEUE_RX].notify_handler = virtio_scmi_rxq_notify_handler;
+        vqs[SCMI_QUEUE_TX].notify_handler = virtio_scmi_txq_notify_handler;
         vdev->vqs = vqs;
         break;
 
@@ -350,7 +350,6 @@ void virtio_dev_reset(VirtIODevice *vdev) {
     for (uint32_t i = 0; i < vdev->vqs_len; i++) {
         virtqueue_reset(&vdev->vqs[i], i);
     }
-    log_warn("virtio debug h4");
     vdev->activated = false;
 }
 
