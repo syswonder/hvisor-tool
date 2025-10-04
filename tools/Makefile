@@ -27,7 +27,7 @@ else
 toolchain := $(CCARCH)-linux-$(LIBC)
 endif
 
-CFLAGS := -Wall -Wextra -DLOG_USE_COLOR -DHLOG=$(LOG) --sysroot=$(ROOT)
+CFLAGS := -Wall -Wno-error -Wextra -Wno-int-conversion -DLOG_USE_COLOR -DHLOG=$(LOG) --sysroot=$(ROOT)
 
 include_dirs := -I../include -I./include -I../cJSON
 

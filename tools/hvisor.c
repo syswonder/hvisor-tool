@@ -95,11 +95,11 @@ int open_dev() {
     return fd;
 }
 
-static __u64 load_image_to_memory(const char *path, __u64 load_paddr) {
+static uint64_t load_image_to_memory(const char *path, uint64_t load_paddr) {
     if (strcmp(path, "null") == 0) {
         return 0;
     }
-    __u64 size, page_size,
+    uint64_t size, page_size,
         map_size; // Define variables: image size, page size, and map size
     int fd;       // File descriptor
     void *image_content,
@@ -118,7 +118,7 @@ static __u64 load_image_to_memory(const char *path, __u64 load_paddr) {
 
     // Map the physical memory to virtual memory
 #ifdef LOONGARCH64
-    virt_addr = (__u64)mmap(NULL, map_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+    virt_addr = (uint64_t)mmap(NULL, map_size, PROT_READ | PROT_WRITE | PROT_EXEC,
                             MAP_SHARED, fd, load_paddr);
 #else
     virt_addr = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
@@ -624,7 +624,7 @@ static int zone_shutdown(int argc, char *argv[]) {
     if (argc != 2 || strcmp(argv[0], "-id") != 0) {
         help(1);
     }
-    __u64 zone_id;
+    uint64_t zone_id;
     sscanf(argv[1], "%llu", &zone_id);
     int fd = open_dev();
     int err = ioctl(fd, HVISOR_ZONE_SHUTDOWN, zone_id);
@@ -634,7 +634,7 @@ static int zone_shutdown(int argc, char *argv[]) {
     return err;
 }
 
-static void print_cpu_list(__u64 cpu_mask, char *outbuf, size_t bufsize) {
+static void print_cpu_list(uint64_t cpu_mask, char *outbuf, size_t bufsize) {
     int found_cpu = 0;
     char *buf = outbuf;
 
@@ -659,7 +659,7 @@ static int zone_list(int argc, char *argv[]) {
     if (argc != 0) {
         help(1);
     }
-    __u64 cnt = CONFIG_MAX_ZONES;
+    uint64_t cnt = CONFIG_MAX_ZONES;
     zone_info_t *zones = malloc(sizeof(zone_info_t) * cnt);
     zone_list_args_t args = {cnt, zones};
     // printf("zone_list: cnt %llu, zones %p\n", cnt, zones);

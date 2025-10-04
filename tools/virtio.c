@@ -33,6 +33,7 @@
 #include "virtio_console.h"
 #include "virtio_gpu.h"
 #include "virtio_net.h"
+#include "virtio_scmi.h"
 
 /// hvisor kernel module fd
 int ko_fd;
@@ -63,6 +64,8 @@ const char *virtio_device_type_to_string(VirtioDeviceType type) {
         return "virtio-blk";
     case VirtioTConsole:
         return "virtio-console";
+    case VirtioTSCMI:
+        return "virtio-scmi";
     case VirtioTGPU:
         return "virtio-gpu";
     default:
@@ -199,6 +202,14 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
         is_err = virtio_console_init(vdev);
         break;
 
+    case VirtioTSCMI:
+        log_warn("virtio scmi is not fully supported yet");
+        vdev->regs.dev_feature = SCMI_SUPPORTED_FEATURES;
+        vdev->dev = init_scmi_dev();
+        init_virtio_queue(vdev, dev_type);
+        is_err = 0;
+        break;
+    
     case VirtioTGPU:
 #ifdef ENABLE_VIRTIO_GPU
         vdev->regs.dev_feature = GPU_SUPPORTED_FEATURES;
@@ -304,6 +315,18 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
 #endif
         break;
 
+    case VirtioTSCMI:
+        vdev->vqs_len = SCMI_MAX_QUEUES;
+        vqs = malloc(sizeof(VirtQueue) * SCMI_MAX_QUEUES);
+        for (int i = 0; i < SCMI_MAX_QUEUES; ++i) {
+            virtqueue_reset(vqs, i);
+            vqs[i].queue_num_max = VIRTQUEUE_SCMI_MAX_SIZE;
+            vqs[i].dev = vdev;
+        }
+        vqs[SCMI_QUEUE_RX].notify_handler = virtio_scmi_rxq_notify_handler;
+        vdev->vqs = vqs;
+        break;
+
     default:
         break;
     }
@@ -320,13 +343,14 @@ void virtio_dev_reset(VirtIODevice *vdev) {
     // When driver read first 4 encoded messages, it will reset dev.
     log_trace("virtio dev reset");
     vdev->regs.status = 0;
-    vdev->regs.interrupt_status = 0;
+        vdev->regs.interrupt_status = 0;
     vdev->regs.interrupt_count = 0;
     int idx = vdev->regs.queue_sel;
     vdev->vqs[idx].ready = 0;
     for (uint32_t i = 0; i < vdev->vqs_len; i++) {
         virtqueue_reset(&vdev->vqs[i], i);
     }
+    log_warn("virtio debug h4");
     vdev->activated = false;
 }
 
@@ -608,8 +632,11 @@ static const char *virtio_mmio_reg_name(uint64_t offset) {
 
 uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
     log_debug("virtio mmio read at %#x", offset);
-    log_info("READ virtio mmio at offset=%#x[%s], size=%d, vdev=%p, type=%d",
-             offset, virtio_mmio_reg_name(offset), size, vdev, vdev->type);
+    log_info("READ virtio mmio at base=%#lx, offset=%#x[%s], size=%d, vdev=%p, type=%s(%d), zone=%d, queue=%d, status=%#x, irq=%d, queue_size=%d",
+             vdev->base_addr, offset, virtio_mmio_reg_name(offset), size, vdev,
+             virtio_device_type_to_string(vdev->type), vdev->type, vdev->zone_id,
+             vdev->regs.queue_sel, vdev->regs.status, vdev->irq_id,
+             vdev->vqs[vdev->regs.queue_sel].num);
 
     if (!vdev) {
         switch (offset) {
@@ -712,10 +739,12 @@ void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
                        unsigned size) {
     log_debug("virtio mmio write at %#x, value is %#x", offset, value);
 
-    log_info("WRITE virtio mmio at offset=%#x[%s], value=%#x, size=%d, "
-             "vdev=%p, type=%d",
-             offset, virtio_mmio_reg_name(offset), value, size, vdev,
-             vdev->type);
+    log_info("WRITE virtio mmio at base=%#lx, offset=%#x[%s], value=%#x, size=%d, "
+             "vdev=%p, type=%s(%d), zone=%d, queue=%d, status=%#x, irq=%d, queue_size=%d",
+             vdev->base_addr, offset, virtio_mmio_reg_name(offset), value, size, vdev,
+             virtio_device_type_to_string(vdev->type), vdev->type, vdev->zone_id,
+             vdev->regs.queue_sel, vdev->regs.status, vdev->irq_id,
+             vdev->vqs[vdev->regs.queue_sel].num);
 
     VirtMmioRegs *regs = &vdev->regs;
     VirtQueue *vqs = vdev->vqs;
@@ -1127,16 +1156,29 @@ int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
     char *type = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "type")->valuestring;
     void *arg0, *arg1;
 
-    // Match the device type field in json
-    if (strcmp(type, "blk") == 0) {
-        dev_type = VirtioTBlock;
-    } else if (strcmp(type, "net") == 0) {
-        dev_type = VirtioTNet;
-    } else if (strcmp(type, "console") == 0) {
-        dev_type = VirtioTConsole;
-    } else if (strcmp(type, "gpu") == 0) {
-        dev_type = VirtioTGPU;
-    } else {
+    // Mapping table for device types
+    static const struct {
+        const char *name;
+        VirtioDeviceType type;
+    } device_type_map[] = {
+        {"blk", VirtioTBlock},
+        {"net", VirtioTNet},
+        {"console", VirtioTConsole},
+        {"gpu", VirtioTGPU},
+        {"scmi", VirtioTSCMI},
+        {NULL, VirtioTNone} // Sentinel
+    };
+
+    // Find device type in mapping table
+    dev_type = VirtioTNone;
+    for (int i = 0; device_type_map[i].name != NULL; i++) {
+        if (strcmp(type, device_type_map[i].name) == 0) {
+            dev_type = device_type_map[i].type;
+            break;
+        }
+    }
+
+    if (dev_type == VirtioTNone) {
         log_error("unknown device type %s", type);
         return -1;
     }
