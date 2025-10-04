@@ -133,7 +133,14 @@ struct VirtIODevice {
 // used event idx for driver telling device when to notify driver.
 #define VQ_USED_EVENT(vq) ((vq)->avail_ring->ring[(vq)->num])
 // avail event idx for device telling driver when to notify device.
-#define VQ_AVAIL_EVENT(vq) (*(uint16_t *)&(vq)->used_ring->ring[(vq)->num])
+#define VQ_AVAIL_EVENT(vq) ({ \
+    union { \
+        VirtqUsedElem elem; \
+        uint16_t val; \
+    } u; \
+    u.elem = (vq)->used_ring->ring[(vq)->num]; \
+    u.val; \
+})
 
 #define VIRT_MAGIC 0x74726976 /* 'virt' */
 

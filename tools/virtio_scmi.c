@@ -22,6 +22,7 @@ SCMIDev *init_scmi_dev() {
 }
 
 int virtio_scmi_rxq_notify_handler(VirtIODevice *vdev, VirtQueue *vq) {
+    (void)vdev; (void)vq;
     log_debug("%s", __func__);
     for (;;) {}
     // while (!virtqueue_is_empty(vq)) {

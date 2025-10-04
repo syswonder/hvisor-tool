@@ -87,12 +87,12 @@ int set_nonblocking(int fd) {
 }
 
 int get_zone_ram_index(void *zonex_ipa, int zone_id) {
+    uintptr_t addr = (uintptr_t)zonex_ipa;
     for (int i = 0; i < MAX_RAMS; i++) {
         if (zone_mem[zone_id][i][MEM_SIZE] == 0)
             continue;
-        ;
-        if (zonex_ipa >= zone_mem[zone_id][i][ZONEX_IPA] &&
-            zonex_ipa < zone_mem[zone_id][i][ZONEX_IPA] +
+        if (addr >= (uintptr_t)zone_mem[zone_id][i][ZONEX_IPA] &&
+            addr < (uintptr_t)zone_mem[zone_id][i][ZONEX_IPA] +
                             zone_mem[zone_id][i][MEM_SIZE]) {
             return i;
         }
@@ -400,7 +400,8 @@ void *get_virt_addr(void *zonex_ipa, int zone_id) {
 // virtqueue is no need to notify device.
 void virtqueue_disable_notify(VirtQueue *vq) {
     if (vq->event_idx_enabled) {
-        VQ_AVAIL_EVENT(vq) = vq->last_avail_idx - 1;
+        vq->used_ring->ring[vq->num].id = vq->last_avail_idx - 1;
+        vq->used_ring->ring[vq->num].len = vq->last_avail_idx - 1;
     } else {
         vq->used_ring->flags |= (uint16_t)VRING_USED_F_NO_NOTIFY;
     }
@@ -409,7 +410,8 @@ void virtqueue_disable_notify(VirtQueue *vq) {
 
 void virtqueue_enable_notify(VirtQueue *vq) {
     if (vq->event_idx_enabled) {
-        VQ_AVAIL_EVENT(vq) = vq->avail_ring->idx;
+        vq->used_ring->ring[vq->num].id = vq->avail_ring->idx;
+        vq->used_ring->ring[vq->num].len = vq->avail_ring->idx;
     } else {
         vq->used_ring->flags &= !(uint16_t)VRING_USED_F_NO_NOTIFY;
     }
@@ -658,7 +660,7 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
         offset -= VIRTIO_MMIO_CONFIG;
         // the first member of vdev->dev must be config.
         log_debug("read virtio dev config");
-        return *(uint64_t *)(vdev->dev + offset);
+        return *(uint64_t *)((uintptr_t)vdev->dev + offset);
     }
 
     if (size != 4) {
@@ -694,8 +696,8 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
         log_debug("read VIRTIO_MMIO_QUEUE_READY");
         return vdev->vqs[vdev->regs.queue_sel].ready;
     case VIRTIO_MMIO_INTERRUPT_STATUS:
-        log_info("debug: (%s) current interrupt status is %d", __func__,
-                 vdev->regs.interrupt_status);
+    log_info("debug: (%s) current interrupt status is %u", __func__,
+             vdev->regs.interrupt_status);
 #ifdef LOONGARCH64
         // clear lvz gintc irq injection bit to avoid endless interrupt...
         log_warn(
@@ -703,7 +705,7 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
         ioctl(ko_fd, HVISOR_CLEAR_INJECT_IRQ);
 #endif
         if (vdev->regs.interrupt_status == 0) {
-            log_error("virtio-mmio-read: interrupt status is 0, type is %d",
+            log_error("virtio-mmio-read: interrupt status is 0, type is %u",
                       vdev->type);
         }
         return vdev->regs.interrupt_status;
@@ -739,8 +741,8 @@ void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
                        unsigned size) {
     log_debug("virtio mmio write at %#x, value is %#x", offset, value);
 
-    log_info("WRITE virtio mmio at base=%#lx, offset=%#x[%s], value=%#x, size=%d, "
-             "vdev=%p, type=%s(%d), zone=%d, queue=%d, status=%#x, irq=%d, queue_size=%d",
+    log_info("WRITE virtio mmio at base=%#lx, offset=%#x[%s], value=%#x, size=%u, "
+             "vdev=%p, type=%s(%u), zone=%u, queue=%u, status=%#x, irq=%u, queue_size=%u",
              vdev->base_addr, offset, virtio_mmio_reg_name(offset), value, size, vdev,
              virtio_device_type_to_string(vdev->type), vdev->type, vdev->zone_id,
              vdev->regs.queue_sel, vdev->regs.status, vdev->irq_id,
@@ -1154,7 +1156,7 @@ int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
 
     // Get device type
     char *type = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "type")->valuestring;
-    void *arg0, *arg1;
+    void *arg0 = NULL, *arg1 = NULL;
 
     // Mapping table for device types
     static const struct {
@@ -1340,8 +1342,8 @@ err_out:
     return err;
 }
 
-int virtio_start(int argc, char *argv[]) {
-    int opt, err = 0;
+int virtio_start(int argc __attribute__((unused)), char *argv[]) {
+    int err = 0;
     err = virtio_init(); // Initialize virtio dependencies
     if (err)
         return -1;

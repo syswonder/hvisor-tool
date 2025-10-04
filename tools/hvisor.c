@@ -95,7 +95,7 @@ int open_dev() {
     return fd;
 }
 
-static uint64_t load_image_to_memory(const char *path, uint64_t load_paddr) {
+static uint64_t load_image_to_memory(char *path, uint64_t load_paddr) {
     if (strcmp(path, "null") == 0) {
         return 0;
     }
@@ -625,7 +625,7 @@ static int zone_shutdown(int argc, char *argv[]) {
         help(1);
     }
     uint64_t zone_id;
-    sscanf(argv[1], "%llu", &zone_id);
+    sscanf(argv[1], "%lu", &zone_id);
     int fd = open_dev();
     int err = ioctl(fd, HVISOR_ZONE_SHUTDOWN, zone_id);
     if (err)
@@ -638,13 +638,13 @@ static void print_cpu_list(uint64_t cpu_mask, char *outbuf, size_t bufsize) {
     int found_cpu = 0;
     char *buf = outbuf;
 
-    for (int i = 0; i < MAX_CPUS && buf - outbuf < bufsize; i++) {
+    for (size_t i = 0; i < MAX_CPUS && (size_t)(buf - outbuf) < bufsize; i++) {
         if ((cpu_mask & (1ULL << i)) != 0) {
             if (found_cpu) {
                 *buf++ = ',';
                 *buf++ = ' ';
             }
-            snprintf(buf, bufsize - (buf - outbuf), "%d", i);
+            snprintf(buf, bufsize - (buf - outbuf), "%zu", i);
             buf += strlen(buf);
             found_cpu = 1;
         }
@@ -656,6 +656,7 @@ static void print_cpu_list(uint64_t cpu_mask, char *outbuf, size_t bufsize) {
 
 // ./hvisor zone list
 static int zone_list(int argc, char *argv[]) {
+    (void)argv;
     if (argc != 0) {
         help(1);
     }
