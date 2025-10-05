@@ -45,6 +45,8 @@ ifeq ($(VIRTIO_GPU), y)
 	CFLAGS += -DENABLE_VIRTIO_GPU
 endif
 
+sources += $(wildcard ./virtio_scmi/*.c)
+
 include $(sources:.c=.d)
 
 ifeq ($(DEBUG), y)

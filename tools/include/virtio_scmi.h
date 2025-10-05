@@ -86,8 +86,61 @@
 #define SCMI_MSG_TYPE_DELAYED_RESP    2  /* Delayed Response */
 #define SCMI_MSG_TYPE_NOTIFICATION    3  /* Notification */
 
+/* -------------------------- SCMI Protocol IDs -------------------------- */
+#define SCMI_PROTO_ID_BASE     0x10    /* Base Protocol */
+#define SCMI_PROTO_ID_CLOCK    0x14    /* Clock Protocol */
+
+/* -------------------------- SCMI Base Protocol Message IDs -------------------------- */
+#define SCMI_BASE_MSG_VERSION               0x0  /* Version request */
+#define SCMI_BASE_MSG_ATTRIBUTES            0x1  /* Protocol attributes */
+#define SCMI_BASE_MSG_DISCOVER_VENDOR       0x3
+#define SCMI_BASE_MSG_DISCOVER_SUB_VENDOR   0x4
+#define SCMI_BASE_MSG_DISCOVER_IMPL_VERSION 0x5
+#define SCMI_BASE_MSG_DISCOVER_LIST_PROTOCOLS 0x6
+#define SCMI_BASE_MSG_DISCOVER_AGENT        0x7
+#define SCMI_BASE_MSG_NOTIFY_ERRORS         0x8
+#define SCMI_BASE_MSG_SET_DEVICE_PERMISSIONS 0x9
+#define SCMI_BASE_MSG_SET_PROTOCOL_PERMISSIONS 0xa
+#define SCMI_BASE_MSG_RESET_AGENT_CONFIGURATION 0xb
+
+/* Base protocol constants */
+#define SCMI_BASE_VENDOR_ID_LEN         16
+#define SCMI_BASE_SUB_VENDOR_ID_LEN     16
+#define SCMI_BASE_IMPL_VERSION_LEN      4
+#define SCMI_BASE_MAX_CMD_ERR_COUNT     5
+
+struct scmi_base_request {
+    uint32_t header; /* Packed SCMI message header */
+    uint8_t payload[]; /* Message-specific payload */
+};
+
+struct scmi_base_response {
+    uint32_t header; /* Packed SCMI message header */
+    uint32_t status; /* Command status */
+    uint8_t payload[]; /* Message-specific payload */
+};
+
+/* SCMI Base Protocol Attributes Response */
+struct scmi_msg_resp_base_attributes {
+    uint8_t num_protocols;
+    uint8_t num_agents;
+    uint16_t reserved;
+};
+
 /* -------------------------- Token Maximum Value -------------------------- */
 #define SCMI_TOKEN_MAX  ((1u << (SCMI_TOKEN_ID_HIGH - SCMI_TOKEN_ID_LOW + 1)) - 1)
+
+typedef struct virtio_scmi_dev {
+    int fd;
+} SCMIDev;
+
+/* -------------------------- Protocol Callback Table -------------------------- */
+struct virtio_scmi_proto {
+    uint8_t proto_id;  /* Protocol ID (e.g. SCMI_PROTO_ID_BASE) */
+    /* Handle protocol request: return 0 on success, negative for error */
+    int (*handle_req)(SCMIDev *dev, uint8_t msg_id, uint16_t token,
+                     const struct iovec *req_iov, struct iovec *resp_iov);
+};
 
 enum scmi_error_codes {
 	SCMI_SUCCESS = 0,	/* Success */
@@ -103,18 +156,63 @@ enum scmi_error_codes {
 	SCMI_ERR_PROTOCOL = -10,/* Protocol Error */
 };
 
-typedef struct virtio_scmi_dev {
-    int fd;
-} SCMIDev;
-
 #define SCMI_SUPPORTED_FEATURES                                             \
     (1ULL << VIRTIO_F_VERSION_1)
 
-#define SCMI_MAX_QUEUES 1
+#define SCMI_MAX_DESCRIPTORS     16
+#define SCMI_MAX_BUFFER_SIZE    (1024 * 1024) // 1MB
+#define SCMI_MAX_PROTOCOLS       16
+
+/* Notification support */
+#define SCMI_MAX_QUEUES 2
 #define VIRTQUEUE_SCMI_MAX_SIZE 64
 #define SCMI_QUEUE_TX 0
+#define SCMI_QUEUE_RX 1
 
+/* Base Protocol Events */
+#define SCMI_BASE_ERROR_EVENT 0x1
+#define BASE_TP_NOTIFY_ALL (1 << 0)
 
+struct scmi_base_error_notify_payld {
+    uint32_t agent_id;
+    uint32_t error_status;
+    uint64_t msg_reports[SCMI_BASE_MAX_CMD_ERR_COUNT];
+};
+
+struct scmi_base_error_report {
+    uint64_t timestamp;
+    uint32_t agent_id;
+    bool fatal;
+    uint32_t cmd_count;
+    uint64_t reports[SCMI_BASE_MAX_CMD_ERR_COUNT];
+};
+
+/* SCMI Protocol Operations */
+struct scmi_protocol {
+    uint8_t id;
+    
+    /* Message handlers */
+    int (*handle_message)(SCMIDev *dev, uint8_t msg_id, uint16_t token,
+                         const struct iovec *req_iov, struct iovec *resp_iov);
+};
+
+/* Core SCMI Functions */
+int scmi_validate_request(size_t req_size, size_t min_req_size,
+                         size_t resp_size, size_t min_resp_size);
+
+int scmi_make_response(SCMIDev *dev, uint16_t token, 
+                      struct iovec *resp_iov, int32_t status);
+
+/* Protocol Registration */
+int scmi_register_protocol(const struct scmi_protocol *ops);
+
+const struct scmi_protocol *scmi_get_protocol_by_index(int index);
+
+int scmi_handle_message(SCMIDev *dev, uint8_t protocol_id, uint8_t msg_id,
+                      uint16_t token, const struct iovec *req_iov,
+                      struct iovec *resp_iov);
+
+int scmi_get_protocol_count(void);
 
 SCMIDev *init_scmi_dev();
 int virtio_scmi_txq_notify_handler(VirtIODevice *vdev, VirtQueue *vq);
