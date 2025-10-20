@@ -632,8 +632,7 @@ static const char *virtio_mmio_reg_name(uint64_t offset) {
 }
 
 uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
-    log_debug("virtio mmio read at %#x", offset);
-    log_info("READ virtio mmio at base=%#lx, offset=%#x[%s], size=%d, vdev=%p, type=%s(%d), zone=%d, queue=%d, status=%#x, irq=%d, queue_size=%d",
+    log_debug("READ virtio mmio at base=%#lx, offset=%#x[%s], size=%d, vdev=%p, type=%s(%d), zone=%d, queue=%d, status=%#x, irq=%d, queue_size=%d",
              vdev->base_addr, offset, virtio_mmio_reg_name(offset), size, vdev,
              virtio_device_type_to_string(vdev->type), vdev->type, vdev->zone_id,
              vdev->regs.queue_sel, vdev->regs.status, vdev->irq_id,
@@ -738,9 +737,7 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
 
 void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
                        unsigned size) {
-    log_debug("virtio mmio write at %#x, value is %#x", offset, value);
-
-    log_info("WRITE virtio mmio at base=%#lx, offset=%#x[%s], value=%#x, size=%u, "
+    log_debug("WRITE virtio mmio at base=%#lx, offset=%#x[%s], value=%#x, size=%u, "
              "vdev=%p, type=%s(%u), zone=%u, queue=%u, status=%#x, irq=%u, queue_size=%u",
              vdev->base_addr, offset, virtio_mmio_reg_name(offset), value, size, vdev,
              virtio_device_type_to_string(vdev->type), vdev->type, vdev->zone_id,

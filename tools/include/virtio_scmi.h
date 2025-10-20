@@ -90,18 +90,30 @@
 #define SCMI_PROTO_ID_BASE     0x10    /* Base Protocol */
 #define SCMI_PROTO_ID_CLOCK    0x14    /* Clock Protocol */
 
+/* -------------------------- SCMI Common Protocol Message IDs -------------------------- */
+#define SCMI_COMMON_MSG_VERSION                        0x0  /* Version request */
+#define SCMI_COMMON_MSG_PROTOCOL_ATTRIBUTES            0x1  /* Protocol attributes */
+#define SCMI_COMMON_MSG_MESSAGE_ATTRIBUTES             0x2  /* Protocol message attributes */
+
 /* -------------------------- SCMI Base Protocol Message IDs -------------------------- */
-#define SCMI_BASE_MSG_VERSION               0x0  /* Version request */
-#define SCMI_BASE_MSG_ATTRIBUTES            0x1  /* Protocol attributes */
-#define SCMI_BASE_MSG_DISCOVER_VENDOR       0x3
-#define SCMI_BASE_MSG_DISCOVER_SUB_VENDOR   0x4
-#define SCMI_BASE_MSG_DISCOVER_IMPL_VERSION 0x5
-#define SCMI_BASE_MSG_DISCOVER_LIST_PROTOCOLS 0x6
-#define SCMI_BASE_MSG_DISCOVER_AGENT        0x7
-#define SCMI_BASE_MSG_NOTIFY_ERRORS         0x8
-#define SCMI_BASE_MSG_SET_DEVICE_PERMISSIONS 0x9
-#define SCMI_BASE_MSG_SET_PROTOCOL_PERMISSIONS 0xa
+#define SCMI_BASE_MSG_DISCOVER_VENDOR           0x3
+#define SCMI_BASE_MSG_DISCOVER_SUB_VENDOR       0x4
+#define SCMI_BASE_MSG_DISCOVER_IMPL_VERSION     0x5
+#define SCMI_BASE_MSG_DISCOVER_LIST_PROTOCOLS   0x6
+#define SCMI_BASE_MSG_DISCOVER_AGENT            0x7
+#define SCMI_BASE_MSG_NOTIFY_ERRORS             0x8
+#define SCMI_BASE_MSG_SET_DEVICE_PERMISSIONS    0x9
+#define SCMI_BASE_MSG_SET_PROTOCOL_PERMISSIONS  0xa
 #define SCMI_BASE_MSG_RESET_AGENT_CONFIGURATION 0xb
+
+/* -------------------------- SCMI Clock Protocol Message IDs ---------- */
+#define SCMI_CLOCK_MSG_CLK_ATTRIBUTES         0x3  /* Clock protocol attributes */
+#define SCMI_CLOCK_MSG_DESCRIBE_RATES         0x4  /* Describe supported rates */
+#define SCMI_CLOCK_MSG_RATE_SET               0x5  /* Set clock rate */
+#define SCMI_CLOCK_MSG_RATE_GET               0x6  /* Get current clock rate */
+#define SCMI_CLOCK_MSG_CONFIG_SET             0x7  /* Enable/disable clock */
+#define SCMI_CLOCK_MSG_CONFIG_GET             0x8  /* Get clock enable state */
+#define SCMI_CLOCK_MSG_NAME_GET               0x9  /* Get clock name */
 
 /* Base protocol constants */
 #define SCMI_BASE_VENDOR_ID_LEN         16
@@ -109,12 +121,12 @@
 #define SCMI_BASE_IMPL_VERSION_LEN      4
 #define SCMI_BASE_MAX_CMD_ERR_COUNT     5
 
-struct scmi_base_request {
+struct scmi_request {
     uint32_t header; /* Packed SCMI message header */
     uint8_t payload[]; /* Message-specific payload */
 };
 
-struct scmi_base_response {
+struct scmi_response {
     uint32_t header; /* Packed SCMI message header */
     uint32_t status; /* Command status */
     uint8_t payload[]; /* Message-specific payload */
@@ -125,6 +137,12 @@ struct scmi_msg_resp_base_attributes {
     uint8_t num_protocols;
     uint8_t num_agents;
     uint16_t reserved;
+};
+
+struct scmi_msg_resp_clock_attributes {
+    uint16_t num_clocks;
+    uint8_t max_async_req;
+    uint8_t reserved;
 };
 
 /* -------------------------- Token Maximum Value -------------------------- */
@@ -192,7 +210,7 @@ struct scmi_protocol {
     uint8_t id;
     
     /* Message handlers */
-    int (*handle_message)(SCMIDev *dev, uint8_t msg_id, uint16_t token,
+    int (*handle_request)(SCMIDev *dev, uint8_t msg_id, uint16_t token,
                          const struct iovec *req_iov, struct iovec *resp_iov);
 };
 
