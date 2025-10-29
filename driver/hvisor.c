@@ -31,27 +31,50 @@
 #include "hvisor.h"
 #include "zone_config.h"
 
-static int get_clock_count(void) {
-    struct device_node *clk_np;
-    struct clk *clk;
-    struct of_phandle_args clkspec;
-    int count = 0;
-    u32 phandle = 2; // Hardcoded to 2 as requested by user
+/* Clock provider phandle, hardcoded as requested */
+#define CLOCK_PROVIDER_PHANDLE 2
 
-    clk_np = of_find_node_by_phandle(phandle);
-    if (!clk_np) {
+/**
+ * get_clock_provider_node - 获取时钟提供者节点
+ *
+ * 返回: 成功时返回时钟提供者节点指针，失败时返回NULL
+ */
+static struct device_node *get_clock_provider_node(void) {
+    struct device_node *provider_np = of_find_node_by_phandle(CLOCK_PROVIDER_PHANDLE);
+    if (!provider_np) {
         pr_err("Failed to find clock provider node\n");
+    }
+    return provider_np;
+}
+
+static struct clk *get_clock_by_id(u32 clk_id, struct device_node *provider_np) {
+    struct of_phandle_args clkspec;
+    
+    if (!provider_np) {
+        return ERR_PTR(-ENODEV);
+    }
+    
+    clkspec.np = provider_np;
+    clkspec.args[0] = clk_id;
+    clkspec.args_count = 1;
+    
+    return of_clk_get_from_provider(&clkspec);
+}
+
+static int get_clock_count(void) {
+    struct device_node *provider_np;
+    struct clk *clk;
+    int count = 0;
+
+    provider_np = get_clock_provider_node();
+    if (!provider_np) {
         return -ENODEV;
     }
 
     while (1) {
-        clkspec.np = clk_np;
-        clkspec.args[0] = count;
-        clkspec.args_count = 1;
-
-        clk = of_clk_get_from_provider(&clkspec);
+        clk = get_clock_by_id(count, provider_np);
         if (IS_ERR(clk)) {
-            of_node_put(clkspec.np);
+            of_node_put(provider_np);
             if (PTR_ERR(clk) == -ENOENT)
                 break; // No more clocks
             return PTR_ERR(clk);
@@ -62,9 +85,59 @@ static int get_clock_count(void) {
         count++;
     }
 
-    of_node_put(clk_np);
+    of_node_put(provider_np);
     pr_info("total clocks = %d\n", count);
     return count;
+}
+
+extern bool __clk_is_enabled(const struct clk *clk);
+extern const char *__clk_get_name(const struct clk *clk);
+
+static int get_clock_attributes(u32 clock_id, u32 *enabled, u32 *parent_id, char *clock_name) {
+    struct device_node *provider_np;
+    struct clk *clk, *parent_clk;
+    const char *name;
+
+    provider_np = get_clock_provider_node();
+    if (!provider_np) {
+        return -ENODEV;
+    }
+
+    clk = get_clock_by_id(clock_id, provider_np);
+    if (IS_ERR(clk)) {
+        of_node_put(provider_np);
+        if (PTR_ERR(clk) == -ENOENT)
+            return -ENOENT;
+        return PTR_ERR(clk);
+    }
+
+    // Get clock enable status
+    *enabled = __clk_is_enabled(clk) ? 1 : 0;
+
+    // Get parent clock
+    parent_clk = clk_get_parent(clk);
+    if (IS_ERR(parent_clk) || !parent_clk) {
+        *parent_id = -1; // No parent
+    } else {
+        // For now, we'll set a default parent_id
+        // In a more complete implementation, we'd need to find the parent's index
+        *parent_id = -1; // Simplified for now
+    }
+
+    // Get clock name
+    name = __clk_get_name(clk);
+    if (name) {
+        strncpy(clock_name, name, 63);
+        clock_name[63] = '\0';
+    } else {
+        snprintf(clock_name, 64, "unknown_clk_%u", clock_id);
+    }
+
+    clk_put(clk);
+    of_node_put(provider_np);
+    
+    pr_info("clock[%u] name=%s enabled=%u parent_id=%d\n", clock_id, clock_name, *enabled, *parent_id);
+    return 0;
 }
 
 // Encapsulate the function to handle SCMI clock ioctl
@@ -81,6 +154,20 @@ static int hvisor_scmi_clock_ioctl(struct hvisor_scmi_clock_args __user *user_ar
             return ret;
         args.u.clock_count = (u32)ret;
         if (copy_to_user(&user_args->u.clock_count, &args.u.clock_count, sizeof(u32)))
+            return -EFAULT;
+        return 0;
+    }
+    case HVISOR_SCMI_CLOCK_GET_ATTRIBUTES: {
+        u32 enabled, parent_id;
+        char clock_name[64];
+        int ret = get_clock_attributes(args.u.clock_attr.clock_id, &enabled, &parent_id, clock_name);
+        if (ret < 0)
+            return ret;
+        args.u.clock_attr.enabled = enabled;
+        args.u.clock_attr.parent_id = parent_id;
+        strncpy(args.u.clock_attr.clock_name, clock_name, 63);
+        args.u.clock_attr.clock_name[63] = '\0';
+        if (copy_to_user(&user_args->u.clock_attr, &args.u.clock_attr, sizeof(args.u.clock_attr)))
             return -EFAULT;
         return 0;
     }

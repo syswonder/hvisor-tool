@@ -149,25 +149,44 @@ static int handle_clock_version(SCMIDev *dev, uint16_t token,
     return 0;
 }
 
-// Function to encapsulate ioctl call for getting the number of clocks
-static int scmi_clock_get_count(uint16_t *clock_count) {
+/**
+ * hvisor_scmi_ioctl - 通用的hvisor设备ioctl操作封装函数
+ * @subcmd: HVISOR_SCMI_CLOCK_XXX子命令
+ * @ioctl_args: 输入/输出参数结构体指针
+ * @args_size: 参数结构体大小
+ *
+ * 返回: 成功返回0，失败返回负数错误码
+ */
+static int hvisor_scmi_ioctl(uint32_t subcmd, struct hvisor_scmi_clock_args *ioctl_args, size_t args_size) {
     int fd = open(HVISOR_DEVICE, O_RDWR);
     if (fd < 0) {
         log_error("Failed to open hvisor device");
         return -ENODEV;
     }
 
-    struct hvisor_scmi_clock_args args;
-    args.subcmd = HVISOR_SCMI_CLOCK_GET_COUNT;
-    args.data_len = sizeof(args.u.clock_count);
-    args.u.clock_count = 0;
-    
-    if (ioctl(fd, HVISOR_SCMI_CLOCK_IOCTL, &args) < 0) {
-        log_error("Failed to get clock count from kernel");
+    // 初始化参数
+    memset(ioctl_args, 0, args_size);
+    ioctl_args->subcmd = subcmd;
+    ioctl_args->data_len = args_size - offsetof(struct hvisor_scmi_clock_args, u);
+
+    // 执行ioctl调用
+    if (ioctl(fd, HVISOR_SCMI_CLOCK_IOCTL, ioctl_args) < 0) {
+        log_error("Failed to perform SCMI clock ioctl, subcmd=%u: %s", 
+                 subcmd, strerror(errno));
         close(fd);
         return -EIO;
     }
     close(fd);
+
+    return 0;
+}
+
+static int scmi_clock_get_count(uint16_t *clock_count) {
+    struct hvisor_scmi_clock_args args;
+    int ret = hvisor_scmi_ioctl(HVISOR_SCMI_CLOCK_GET_COUNT, &args, sizeof(args));
+    if (ret < 0) {
+        return ret;
+    }
 
     *clock_count = args.u.clock_count;
     return 0;
@@ -186,16 +205,17 @@ static int handle_clock_protocol_attributes(SCMIDev *dev, uint16_t token,
 
     struct scmi_response *resp = resp_iov->iov_base;
     struct scmi_msg_resp_clock_attributes *attr = (struct scmi_msg_resp_clock_attributes *)resp->payload;
-    scmi_make_response(dev, token, resp_iov, SCMI_SUCCESS);
 
     // Call the encapsulated function to get clock count
     ret = scmi_clock_get_count(&attr->num_clocks);
     if (ret < 0) {
-        return ret;
+        return scmi_make_response(dev, token, resp_iov, SCMI_ERR_GENERIC);
     }
 
     attr->max_async_req = 1; // support 1 async request
     attr->reserved = 0;
+
+    scmi_make_response(dev, token, resp_iov, SCMI_SUCCESS);
 
     log_debug("CLOCK_PROTOCOL_ATTRIBUTES: num_clocks=%d", attr->num_clocks);
     return 0;
@@ -218,7 +238,16 @@ static int handle_clock_clock_attributes(SCMIDev *dev, uint16_t token,
         return scmi_make_response(dev, token, resp_iov, SCMI_ERR_RANGE);
     }
 
-    struct fake_clock *clk = &g_clocks[clock_id];
+    // Prepare ioctl arguments
+    struct hvisor_scmi_clock_args args;
+    args.u.clock_attr.clock_id = clock_id;
+    
+    // Call the common ioctl function
+    int ret = hvisor_scmi_ioctl(HVISOR_SCMI_CLOCK_GET_ATTRIBUTES, &args, sizeof(args));
+    if (ret < 0) {
+        return scmi_make_response(dev, token, resp_iov, SCMI_ERR_GENERIC);
+    }
+
     struct scmi_response *resp = resp_iov->iov_base;
     struct scmi_msg_resp_clock_clock_attributes *attr =
         (struct scmi_msg_resp_clock_clock_attributes *)resp->payload;
@@ -226,7 +255,7 @@ static int handle_clock_clock_attributes(SCMIDev *dev, uint16_t token,
     // Build attributes field
     uint32_t attributes = 0;
     // Bit[0]: enabled
-    if (clk->enabled) {
+    if (args.u.clock_attr.enabled) {
         attributes |= (1U << 0);
     }
     // Bit[1]: restricted clock? (we don't implement permissions, so assume not restricted)
@@ -235,8 +264,8 @@ static int handle_clock_clock_attributes(SCMIDev *dev, uint16_t token,
     // Bit[27]: extended config support? (we only support basic enable/disable)
     // -> set to 0
 
-    // Bit[28]: parent clock identifier support? (we have parent_id)
-    if (clk->parent_id != -1) {
+    // Bit[28]: parent clock identifier support?
+    if (args.u.clock_attr.parent_id != (uint32_t)(-1)) {
         attributes |= (1U << 28);
     }
 
@@ -249,18 +278,15 @@ static int handle_clock_clock_attributes(SCMIDev *dev, uint16_t token,
     attr->attributes = attributes;
 
     // Copy clock name (max 15 chars + null)
-    strncpy(attr->clock_name, clk->name, 15);
+    strncpy(attr->clock_name, args.u.clock_attr.clock_name, 15);
     attr->clock_name[15] = '\0';
 
-    // // Enable delay: we don't model real delay, so return 0 (unsupported)
-    // attr->clock_enable_delay = 0;
-
     log_info("***CLOCK_CLOCK_ATTRIBUTES: clock_id=%u, name=%s, enabled=%d",
-             clock_id, attr->clock_name, clk->enabled);
+             clock_id, attr->clock_name, args.u.clock_attr.enabled);
 
     scmi_make_response(dev, token, resp_iov, SCMI_SUCCESS);
     log_debug("CLOCK_ATTRIBUTES: clock_id=%u, name=%s, enabled=%d",
-              clock_id, attr->clock_name, clk->enabled);
+              clock_id, attr->clock_name, args.u.clock_attr.enabled);
     return 0;
 }
 static int handle_clock_describe_rates(SCMIDev *dev, uint16_t token,

@@ -82,6 +82,7 @@ typedef struct ioctl_zone_list_args zone_list_args_t;
 
 /* SCMI Clock Subcommands */
 #define HVISOR_SCMI_CLOCK_GET_COUNT 0x01
+#define HVISOR_SCMI_CLOCK_GET_ATTRIBUTES 0x02
 
 /* SCMI Clock ioctl argument structure */
 struct hvisor_scmi_clock_args {
@@ -89,6 +90,12 @@ struct hvisor_scmi_clock_args {
     __u32 data_len; /* Length of data buffer */
     union {
         __u32 clock_count; /* For GET_COUNT */
+        struct {
+            __u32 clock_id;
+            __u32 enabled;
+            __u32 parent_id;
+            char clock_name[64];
+        } clock_attr;      /* For GET_ATTRIBUTES */
         __u8 data[0];      /* For other commands */
     } u;
 };
