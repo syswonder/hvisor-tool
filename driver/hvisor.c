@@ -36,7 +36,7 @@ static int get_clock_count(void) {
     struct clk *clk;
     struct of_phandle_args clkspec;
     int count = 0;
-    u32 phandle = 2; // 暂时写死为2，如用户要求
+    u32 phandle = 2; // Hardcoded to 2 as requested by user
 
     clk_np = of_find_node_by_phandle(phandle);
     if (!clk_np) {
@@ -53,7 +53,7 @@ static int get_clock_count(void) {
         if (IS_ERR(clk)) {
             of_node_put(clkspec.np);
             if (PTR_ERR(clk) == -ENOENT)
-                break; // 没有更多时钟
+                break; // No more clocks
             return PTR_ERR(clk);
         }
 
@@ -65,6 +65,28 @@ static int get_clock_count(void) {
     of_node_put(clk_np);
     pr_info("total clocks = %d\n", count);
     return count;
+}
+
+// Encapsulate the function to handle SCMI clock ioctl
+static int hvisor_scmi_clock_ioctl(struct hvisor_scmi_clock_args __user *user_args) {
+    struct hvisor_scmi_clock_args args;
+    
+    if (copy_from_user(&args, user_args, sizeof(struct hvisor_scmi_clock_args)))
+        return -EFAULT;
+        
+    switch (args.subcmd) {
+    case HVISOR_SCMI_CLOCK_GET_COUNT: {
+        int ret = get_clock_count();
+        if (ret < 0)
+            return ret;
+        args.u.clock_count = (u32)ret;
+        if (copy_to_user(&user_args->u.clock_count, &args.u.clock_count, sizeof(u32)))
+            return -EFAULT;
+        return 0;
+    }
+    default:
+        return -EINVAL;
+    }
 }
 
 struct virtio_bridge *virtio_bridge;
@@ -106,17 +128,17 @@ static int hvisor_finish_req(void) {
 
 //     size = PAGE_ALIGN(size);
 
-//     // 使用 ioremap 映射物理地址
+//     // Use ioremap to map physical address
 //     vaddr = ioremap_cache(phys_start, size);
 //     if (!vaddr) {
 //         pr_err("hvisor.ko: failed to ioremap image\n");
 //         return -ENOMEM;
 //     }
 
-//     // flush I-cache（ARM64 平台中 flush_icache_range 是对 D/I 的处理）
+//     // flush I-cache (flush_icache_range handles both D/I cache on ARM64 platform)
 //     flush_icache_range((unsigned long)vaddr, (unsigned long)vaddr + size);
 
-//     // 解除映射
+//     // Unmap
 //     iounmap(vaddr);
 //     return err;
 // }
@@ -268,16 +290,9 @@ static long hvisor_ioctl(struct file *file, unsigned int ioctl,
     case HVISOR_CONFIG_CHECK:
         err = hvisor_config_check((u64 __user *)arg);
         break;
-    case HVISOR_GET_CLOCK_MESSAGE: {
-        u32 clock_count;
-        int ret = get_clock_count();
-        if (ret < 0)
-            return ret;
-        clock_count = (u32)ret;
-        if (copy_to_user((u32 __user *)arg, &clock_count, sizeof(u32)))
-            return -EFAULT;
-        return 0;
-    }
+    case HVISOR_SCMI_CLOCK_IOCTL:
+        err = hvisor_scmi_clock_ioctl((struct hvisor_scmi_clock_args __user *)arg);
+        break;
 #ifdef LOONGARCH64
     case HVISOR_CLEAR_INJECT_IRQ:
         err = hvisor_call(HVISOR_HC_CLEAR_INJECT_IRQ, 0, 0);

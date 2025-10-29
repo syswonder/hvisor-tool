@@ -61,7 +61,7 @@ static void init_fake_clocks(void) {
 
         // Example supported rates: 100MHz, 200MHz, ..., up to 800MHz
         g_clocks[i].num_rates = 8;
-        for (int j = 0; j < g_clocks[i].num_rates; j++) {
+        for (int j = 0; j < (int)g_clocks[i].num_rates; j++) {
             g_clocks[i].supported_rates[j] = (j + 1) * 100000000ULL; // 100MHz steps
         }
     }
@@ -149,6 +149,30 @@ static int handle_clock_version(SCMIDev *dev, uint16_t token,
     return 0;
 }
 
+// Function to encapsulate ioctl call for getting the number of clocks
+static int scmi_clock_get_count(uint16_t *clock_count) {
+    int fd = open(HVISOR_DEVICE, O_RDWR);
+    if (fd < 0) {
+        log_error("Failed to open hvisor device");
+        return -ENODEV;
+    }
+
+    struct hvisor_scmi_clock_args args;
+    args.subcmd = HVISOR_SCMI_CLOCK_GET_COUNT;
+    args.data_len = sizeof(args.u.clock_count);
+    args.u.clock_count = 0;
+    
+    if (ioctl(fd, HVISOR_SCMI_CLOCK_IOCTL, &args) < 0) {
+        log_error("Failed to get clock count from kernel");
+        close(fd);
+        return -EIO;
+    }
+    close(fd);
+
+    *clock_count = args.u.clock_count;
+    return 0;
+}
+
 static int handle_clock_protocol_attributes(SCMIDev *dev, uint16_t token,
                                 const struct iovec *req_iov,
                                 struct iovec *resp_iov) {
@@ -164,21 +188,12 @@ static int handle_clock_protocol_attributes(SCMIDev *dev, uint16_t token,
     struct scmi_msg_resp_clock_attributes *attr = (struct scmi_msg_resp_clock_attributes *)resp->payload;
     scmi_make_response(dev, token, resp_iov, SCMI_SUCCESS);
 
-    int fd = open(HVISOR_DEVICE, O_RDWR);
-    if (fd < 0) {
-        log_error("Failed to open hvisor device");
-        return -ENODEV;
+    // Call the encapsulated function to get clock count
+    ret = scmi_clock_get_count(&attr->num_clocks);
+    if (ret < 0) {
+        return ret;
     }
 
-    uint32_t clock_count = 0;
-    if (ioctl(fd, HVISOR_GET_CLOCK_MESSAGE, &clock_count) < 0) {
-        log_error("Failed to get clock count from kernel");
-        close(fd);
-        return -EIO;
-    }
-    close(fd);
-
-    attr->num_clocks = clock_count;
     attr->max_async_req = 1; // support 1 async request
     attr->reserved = 0;
 
@@ -358,7 +373,7 @@ static int handle_clock_rate_set(SCMIDev *dev, uint16_t token,
     }
 
     bool async = (flags & 0x1) != 0;
-    bool ignore_delayed = (flags & 0x2) != 0;
+    // bool ignore_delayed = (flags & 0x2) != 0;
     bool round_autonomous = (flags & 0x8) != 0;
     bool round_up = (flags & 0x4) != 0;
 
@@ -419,7 +434,7 @@ static int handle_clock_config_set(SCMIDev *dev, uint16_t token,
     uint8_t *p = req->payload;
     uint32_t clock_id = *(uint32_t *)p; p += 4;
     uint32_t attributes = *(uint32_t *)p; p += 4;
-    uint32_t ext_val = *(uint32_t *)p;
+    // uint32_t ext_val = *(uint32_t *)p;
 
     if (!is_valid_clock_id(clock_id)) {
         return scmi_make_response(dev, token, resp_iov, SCMI_ERR_ENTRY);
@@ -453,7 +468,6 @@ static int handle_clock_name_get(SCMIDev *dev, uint16_t token,
     }
 
     struct fake_clock *clk = &g_clocks[clock_id];
-    size_t name_len = strlen(clk->name) + 1; // include null
     size_t payload_size = 4 + 64; // flags (4) + name[64]
 
     if (resp_iov->iov_len < sizeof(struct scmi_response) + payload_size) {

@@ -71,7 +71,7 @@ typedef struct ioctl_zone_list_args zone_list_args_t;
 #define HVISOR_ZONE_SHUTDOWN _IOW(1, 4, __u64)
 #define HVISOR_ZONE_LIST _IOR(1, 5, zone_list_args_t *)
 #define HVISOR_CONFIG_CHECK _IOR(1, 6, __u64 *)
-#define HVISOR_GET_CLOCK_MESSAGE _IOR(1, 7, __u32 *)
+#define HVISOR_SCMI_CLOCK_IOCTL _IOWR(1, 32, struct hvisor_scmi_clock_args)
 
 #define HVISOR_HC_INIT_VIRTIO 0
 #define HVISOR_HC_FINISH_REQ 1
@@ -79,7 +79,19 @@ typedef struct ioctl_zone_list_args zone_list_args_t;
 #define HVISOR_HC_SHUTDOWN_ZONE 3
 #define HVISOR_HC_ZONE_LIST 4
 #define HVISOR_HC_CONFIG_CHECK 6
-#define HVISOR_HC_GET_CLOCK_MESSAGE 7
+
+/* SCMI Clock Subcommands */
+#define HVISOR_SCMI_CLOCK_GET_COUNT 0x01
+
+/* SCMI Clock ioctl argument structure */
+struct hvisor_scmi_clock_args {
+    __u32 subcmd;   /* Subcommand ID */
+    __u32 data_len; /* Length of data buffer */
+    union {
+        __u32 clock_count; /* For GET_COUNT */
+        __u8 data[0];      /* For other commands */
+    } u;
+};
 
 #ifdef LOONGARCH64
 
