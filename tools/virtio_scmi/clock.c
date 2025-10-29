@@ -11,8 +11,13 @@
 
 #include "virtio_scmi.h"
 #include "log.h"
+#include "hvisor.h"
 #include <string.h>
 #include <stdint.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 
 /* Clock Protocol version 3.0 */
 #define SCMI_CLOCK_VERSION 0x30000
@@ -158,7 +163,22 @@ static int handle_clock_protocol_attributes(SCMIDev *dev, uint16_t token,
     struct scmi_response *resp = resp_iov->iov_base;
     struct scmi_msg_resp_clock_attributes *attr = (struct scmi_msg_resp_clock_attributes *)resp->payload;
     scmi_make_response(dev, token, resp_iov, SCMI_SUCCESS);
-    attr->num_clocks = FAKE_CLOCK_COUNT;
+
+    int fd = open(HVISOR_DEVICE, O_RDWR);
+    if (fd < 0) {
+        log_error("Failed to open hvisor device");
+        return -ENODEV;
+    }
+
+    uint32_t clock_count = 0;
+    if (ioctl(fd, HVISOR_GET_CLOCK_MESSAGE, &clock_count) < 0) {
+        log_error("Failed to get clock count from kernel");
+        close(fd);
+        return -EIO;
+    }
+    close(fd);
+
+    attr->num_clocks = clock_count;
     attr->max_async_req = 1; // support 1 async request
     attr->reserved = 0;
 

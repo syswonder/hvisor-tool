@@ -87,9 +87,9 @@ void *read_file(char *filename, uint64_t *filesize) {
 }
 
 int open_dev() {
-    int fd = open("/dev/hvisor", O_RDWR);
+    int fd = open(HVISOR_DEVICE, O_RDWR);
     if (fd < 0) {
-        log_error("Failed to open /dev/hvisor!");
+        log_error("Failed to open %s!", HVISOR_DEVICE);
         exit(1);
     }
     return fd;

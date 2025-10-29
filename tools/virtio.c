@@ -1108,7 +1108,7 @@ int virtio_init() {
     initialize_log();
 
     log_info("hvisor init");
-    ko_fd = open("/dev/hvisor", O_RDWR);
+    ko_fd = open(HVISOR_DEVICE, O_RDWR);
     if (ko_fd < 0) {
         log_error("open hvisor failed");
         exit(1);

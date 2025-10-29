@@ -26,9 +26,46 @@
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/vmalloc.h>
+#include <linux/clk.h>
 
 #include "hvisor.h"
 #include "zone_config.h"
+
+static int get_clock_count(void) {
+    struct device_node *clk_np;
+    struct clk *clk;
+    struct of_phandle_args clkspec;
+    int count = 0;
+    u32 phandle = 2; // 暂时写死为2，如用户要求
+
+    clk_np = of_find_node_by_phandle(phandle);
+    if (!clk_np) {
+        pr_err("Failed to find clock provider node\n");
+        return -ENODEV;
+    }
+
+    while (1) {
+        clkspec.np = clk_np;
+        clkspec.args[0] = count;
+        clkspec.args_count = 1;
+
+        clk = of_clk_get_from_provider(&clkspec);
+        if (IS_ERR(clk)) {
+            of_node_put(clkspec.np);
+            if (PTR_ERR(clk) == -ENOENT)
+                break; // 没有更多时钟
+            return PTR_ERR(clk);
+        }
+
+        pr_info("clock[%d] found\n", count);
+        clk_put(clk);
+        count++;
+    }
+
+    of_node_put(clk_np);
+    pr_info("total clocks = %d\n", count);
+    return count;
+}
 
 struct virtio_bridge *virtio_bridge;
 int virtio_irq = -1;
@@ -231,6 +268,16 @@ static long hvisor_ioctl(struct file *file, unsigned int ioctl,
     case HVISOR_CONFIG_CHECK:
         err = hvisor_config_check((u64 __user *)arg);
         break;
+    case HVISOR_GET_CLOCK_MESSAGE: {
+        u32 clock_count;
+        int ret = get_clock_count();
+        if (ret < 0)
+            return ret;
+        clock_count = (u32)ret;
+        if (copy_to_user((u32 __user *)arg, &clock_count, sizeof(u32)))
+            return -EFAULT;
+        return 0;
+    }
 #ifdef LOONGARCH64
     case HVISOR_CLEAR_INJECT_IRQ:
         err = hvisor_call(HVISOR_HC_CLEAR_INJECT_IRQ, 0, 0);
