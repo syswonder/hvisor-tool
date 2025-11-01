@@ -83,6 +83,12 @@ typedef struct ioctl_zone_list_args zone_list_args_t;
 /* SCMI Clock Subcommands */
 #define HVISOR_SCMI_CLOCK_GET_COUNT 0x01
 #define HVISOR_SCMI_CLOCK_GET_ATTRIBUTES 0x02
+#define HVISOR_SCMI_CLOCK_DESCRIBE_RATES 0x03
+#define HVISOR_SCMI_CLOCK_RATE_GET 0x04
+#define HVISOR_SCMI_CLOCK_RATE_SET 0x05
+#define HVISOR_SCMI_CLOCK_CONFIG_GET 0x06
+#define HVISOR_SCMI_CLOCK_CONFIG_SET 0x07
+#define HVISOR_SCMI_CLOCK_NAME_GET 0x08
 
 /* SCMI Clock ioctl argument structure */
 struct hvisor_scmi_clock_args {
@@ -96,6 +102,32 @@ struct hvisor_scmi_clock_args {
             __u32 parent_id;
             char clock_name[64];
         } clock_attr;      /* For GET_ATTRIBUTES */
+        struct {
+            __u32 clock_id;
+            __u32 rate_index;
+            __u32 num_rates;
+            __u32 remaining;
+            __u64 rates[8]; /* Max 8 rates per response */
+        } clock_rates_info; /* For DESCRIBE_RATES */
+        struct {
+            __u32 clock_id;
+            __u64 rate;
+        } clock_rate_info; /* For RATE_GET */
+        struct {
+            __u32 clock_id;
+            __u32 flags;
+            __u64 rate;
+        } clock_rate_set_info; /* For RATE_SET */
+        struct {
+            __u32 clock_id;
+            __u32 flags;
+            __u32 config;
+            __u32 extended_config_val;
+        } clock_config_info; /* For CONFIG_GET/CONFIG_SET */
+        struct {
+            __u32 clock_id;
+            char name[64];
+        } clock_name_info; /* For NAME_GET */
         __u8 data[0];      /* For other commands */
     } u;
 };

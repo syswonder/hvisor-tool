@@ -34,6 +34,13 @@
 /* Clock provider phandle, hardcoded as requested */
 #define CLOCK_PROVIDER_PHANDLE 2
 
+extern bool __clk_is_enabled(const struct clk *clk);
+extern const char *__clk_get_name(const struct clk *clk);
+extern unsigned long clk_get_rate(struct clk *clk);
+extern int clk_set_rate(struct clk *clk, unsigned long rate);
+extern int clk_prepare_enable(struct clk *clk);
+extern void clk_disable_unprepare(struct clk *clk);
+
 /**
  * get_clock_provider_node - 获取时钟提供者节点
  *
@@ -90,8 +97,73 @@ static int get_clock_count(void) {
     return count;
 }
 
-extern bool __clk_is_enabled(const struct clk *clk);
-extern const char *__clk_get_name(const struct clk *clk);
+
+
+static int get_clock_config(u32 clock_id, u32 *config, u32 *extended_config_val) {
+    struct device_node *provider_np;
+    struct clk *clk;
+    u32 clk_config = 0;
+
+    provider_np = get_clock_provider_node();
+    if (!provider_np) {
+        return -ENODEV;
+    }
+
+    clk = get_clock_by_id(clock_id, provider_np);
+    if (IS_ERR(clk)) {
+        of_node_put(provider_np);
+        if (PTR_ERR(clk) == -ENOENT)
+            return -ENOENT;
+        return PTR_ERR(clk);
+    }
+
+    // Bit 0: Clock enabled status
+    if (__clk_is_enabled(clk)) {
+        clk_config |= 1;
+    }
+
+    *config = clk_config;
+    *extended_config_val = 0; // Not implemented
+
+    clk_put(clk);
+    of_node_put(provider_np);
+    
+    pr_info("clock[%u] config=0x%x, extended_config_val=0x%x\n", clock_id, *config, *extended_config_val);
+    return 0;
+}
+
+static int get_clock_name(u32 clock_id, char *name) {
+    struct device_node *provider_np;
+    struct clk *clk;
+    const char *clk_name;
+
+    provider_np = get_clock_provider_node();
+    if (!provider_np) {
+        return -ENODEV;
+    }
+
+    clk = get_clock_by_id(clock_id, provider_np);
+    if (IS_ERR(clk)) {
+        of_node_put(provider_np);
+        if (PTR_ERR(clk) == -ENOENT)
+            return -ENOENT;
+        return PTR_ERR(clk);
+    }
+
+    clk_name = __clk_get_name(clk);
+    if (clk_name) {
+        strncpy(name, clk_name, 63);
+        name[63] = '\0';
+    } else {
+        snprintf(name, 64, "unknown_clk_%u", clock_id);
+    }
+
+    clk_put(clk);
+    of_node_put(provider_np);
+    
+    pr_info("clock[%u] name=%s\n", clock_id, name);
+    return 0;
+}
 
 static int get_clock_attributes(u32 clock_id, u32 *enabled, u32 *parent_id, char *clock_name) {
     struct device_node *provider_np;
@@ -140,6 +212,105 @@ static int get_clock_attributes(u32 clock_id, u32 *enabled, u32 *parent_id, char
     return 0;
 }
 
+static int get_clock_rate(u32 clock_id, u64 *rate) {
+    struct device_node *provider_np;
+    struct clk *clk;
+    unsigned long clk_rate;
+
+    provider_np = get_clock_provider_node();
+    if (!provider_np) {
+        return -ENODEV;
+    }
+
+    clk = get_clock_by_id(clock_id, provider_np);
+    if (IS_ERR(clk)) {
+        of_node_put(provider_np);
+        if (PTR_ERR(clk) == -ENOENT)
+            return -ENOENT;
+        return PTR_ERR(clk);
+    }
+
+    clk_rate = clk_get_rate(clk);
+    *rate = (u64)clk_rate;
+
+    clk_put(clk);
+    of_node_put(provider_np);
+    
+    pr_info("clock[%u] rate=%llu Hz\n", clock_id, *rate);
+    return 0;
+}
+
+static int set_clock_rate(u32 clock_id, u64 rate) {
+    struct device_node *provider_np;
+    struct clk *clk;
+    int ret;
+
+    provider_np = get_clock_provider_node();
+    if (!provider_np) {
+        return -ENODEV;
+    }
+
+    clk = get_clock_by_id(clock_id, provider_np);
+    if (IS_ERR(clk)) {
+        of_node_put(provider_np);
+        if (PTR_ERR(clk) == -ENOENT)
+            return -ENOENT;
+        return PTR_ERR(clk);
+    }
+
+    ret = clk_set_rate(clk, (unsigned long)rate);
+
+    clk_put(clk);
+    of_node_put(provider_np);
+    
+    if (ret == 0) {
+        pr_info("clock[%u] rate set to %llu Hz\n", clock_id, rate);
+    } else {
+        pr_err("Failed to set clock[%u] rate to %llu Hz, error=%d\n", clock_id, rate, ret);
+    }
+    
+    return ret;
+}
+
+static int set_clock_config(u32 clock_id, u32 config) {
+    struct device_node *provider_np;
+    struct clk *clk;
+    int ret = 0;
+
+    provider_np = get_clock_provider_node();
+    if (!provider_np) {
+        return -ENODEV;
+    }
+
+    clk = get_clock_by_id(clock_id, provider_np);
+    if (IS_ERR(clk)) {
+        of_node_put(provider_np);
+        if (PTR_ERR(clk) == -ENOENT)
+            return -ENOENT;
+        return PTR_ERR(clk);
+    }
+
+    // Bit 0: Clock enable/disable
+    if (config & 1) {
+        // Enable clock
+        ret = clk_prepare_enable(clk);
+        if (ret) {
+            pr_err("Failed to enable clock[%u], error=%d\n", clock_id, ret);
+        } else {
+            pr_info("clock[%u] enabled\n", clock_id);
+        }
+    } else {
+        // Disable clock
+        clk_disable_unprepare(clk);
+        pr_info("clock[%u] disabled\n", clock_id);
+    }
+
+    clk_put(clk);
+    of_node_put(provider_np);
+    
+    return ret;
+}
+
 // Encapsulate the function to handle SCMI clock ioctl
 static int hvisor_scmi_clock_ioctl(struct hvisor_scmi_clock_args __user *user_args) {
     struct hvisor_scmi_clock_args args;
@@ -168,6 +339,48 @@ static int hvisor_scmi_clock_ioctl(struct hvisor_scmi_clock_args __user *user_ar
         strncpy(args.u.clock_attr.clock_name, clock_name, 63);
         args.u.clock_attr.clock_name[63] = '\0';
         if (copy_to_user(&user_args->u.clock_attr, &args.u.clock_attr, sizeof(args.u.clock_attr)))
+            return -EFAULT;
+        return 0;
+    }
+    case HVISOR_SCMI_CLOCK_DESCRIBE_RATES: {
+        // Not implemented yet, return error
+        return -EINVAL;
+    }
+    case HVISOR_SCMI_CLOCK_RATE_GET: {
+        u64 rate;
+        int ret = get_clock_rate(args.u.clock_rate_info.clock_id, &rate);
+        if (ret < 0)
+            return ret;
+        args.u.clock_rate_info.rate = rate;
+        if (copy_to_user(&user_args->u.clock_rate_info, &args.u.clock_rate_info, sizeof(args.u.clock_rate_info)))
+            return -EFAULT;
+        return 0;
+    }
+    case HVISOR_SCMI_CLOCK_RATE_SET: {
+        return set_clock_rate(args.u.clock_rate_set_info.clock_id, args.u.clock_rate_set_info.rate);
+    }
+    case HVISOR_SCMI_CLOCK_CONFIG_GET: {
+        u32 config, extended_config_val;
+        int ret = get_clock_config(args.u.clock_config_info.clock_id, &config, &extended_config_val);
+        if (ret < 0)
+            return ret;
+        args.u.clock_config_info.config = config;
+        args.u.clock_config_info.extended_config_val = extended_config_val;
+        if (copy_to_user(&user_args->u.clock_config_info, &args.u.clock_config_info, sizeof(args.u.clock_config_info)))
+            return -EFAULT;
+        return 0;
+    }
+    case HVISOR_SCMI_CLOCK_CONFIG_SET: {
+        return set_clock_config(args.u.clock_config_info.clock_id, args.u.clock_config_info.config);
+    }
+    case HVISOR_SCMI_CLOCK_NAME_GET: {
+        char name[64];
+        int ret = get_clock_name(args.u.clock_name_info.clock_id, name);
+        if (ret < 0)
+            return ret;
+        strncpy(args.u.clock_name_info.name, name, 63);
+        args.u.clock_name_info.name[63] = '\0';
+        if (copy_to_user(&user_args->u.clock_name_info, &args.u.clock_name_info, sizeof(args.u.clock_name_info)))
             return -EFAULT;
         return 0;
     }
