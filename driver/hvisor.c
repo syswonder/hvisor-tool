@@ -65,6 +65,7 @@ static struct clk *get_clock_by_id(u32 clk_id, struct device_node *provider_np) 
     clkspec.args[0] = clk_id;
     clkspec.args_count = 1;
     
+    pr_info("clk_id = %u, now try to get clock...\n", clk_id);
     return of_clk_get_from_provider(&clkspec);
 }
 
@@ -77,18 +78,19 @@ static int get_clock_count(void) {
     if (!provider_np) {
         return -ENODEV;
     }
+    pr_info("provider_np name = %s\n", provider_np->name);
 
     while (1) {
         clk = get_clock_by_id(count, provider_np);
+
         if (IS_ERR(clk)) {
-            of_node_put(provider_np);
-            if (PTR_ERR(clk) == -ENOENT)
-                break; // No more clocks
-            return PTR_ERR(clk);
+            if (PTR_ERR(clk) == -EINVAL) break; // idx >= provider->data->clk_num, which means no more clocks
+        } else {
+            clk_put(clk);
         }
 
         pr_info("clock[%d] found\n", count);
-        clk_put(clk);
+        
         count++;
     }
 
