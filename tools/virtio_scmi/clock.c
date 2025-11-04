@@ -65,6 +65,10 @@ struct clock_name_info {
 /* Forward declarations */
 static int scmi_clock_get_count(uint16_t *clock_count);
 
+/* Cache for clock count */
+static uint16_t cached_clock_count = 0;
+static bool clock_count_cache_valid = false;
+
 /* Response for CLOCK_ATTRIBUTES (Message ID 0x3) */
 struct scmi_msg_resp_clock_clock_attributes {
     uint32_t attributes;          /* Bitfield as per spec */
@@ -136,6 +140,11 @@ static int hvisor_scmi_ioctl(uint32_t subcmd, struct hvisor_scmi_clock_args *ioc
 }
 
 static int scmi_clock_get_count(uint16_t *clock_count) {
+    if (clock_count_cache_valid) {
+        *clock_count = cached_clock_count;
+        return 0;
+    }
+
     struct hvisor_scmi_clock_args args;
     int ret = hvisor_scmi_ioctl(HVISOR_SCMI_CLOCK_GET_COUNT, &args, sizeof(args));
     if (ret < 0) {
@@ -143,6 +152,9 @@ static int scmi_clock_get_count(uint16_t *clock_count) {
     }
 
     *clock_count = args.u.clock_count;
+    cached_clock_count = args.u.clock_count;
+    clock_count_cache_valid = true;
+    
     return 0;
 }
 
@@ -235,8 +247,8 @@ static int handle_clock_clock_attributes(SCMIDev *dev, uint16_t token,
     strncpy(attr->clock_name, args.u.clock_attr.clock_name, 15);
     attr->clock_name[15] = '\0';
 
-    log_info("***CLOCK_CLOCK_ATTRIBUTES: clock_id=%u, name=%s, enabled=%d",
-             clock_id, attr->clock_name, args.u.clock_attr.enabled);
+    log_info("***CLOCK_CLOCK_ATTRIBUTES: clock_id=%u, name=%s, enabled=%d, is_valid=%d",
+             clock_id, attr->clock_name, args.u.clock_attr.enabled, args.u.clock_attr.is_valid);
 
     scmi_make_response(dev, token, resp_iov, SCMI_SUCCESS);
     log_debug("CLOCK_ATTRIBUTES: clock_id=%u, name=%s, enabled=%d",

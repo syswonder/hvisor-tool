@@ -65,7 +65,7 @@ static struct clk *get_clock_by_id(u32 clk_id, struct device_node *provider_np) 
     clkspec.args[0] = clk_id;
     clkspec.args_count = 1;
     
-    pr_info("clk_id = %u, now try to get clock...\n", clk_id);
+    // pr_info("clk_id = %u, now try to get clock...\n", clk_id);
     return of_clk_get_from_provider(&clkspec);
 }
 
@@ -78,7 +78,6 @@ static int get_clock_count(void) {
     if (!provider_np) {
         return -ENODEV;
     }
-    pr_info("provider_np name = %s\n", provider_np->name);
 
     while (1) {
         clk = get_clock_by_id(count, provider_np);
@@ -88,8 +87,6 @@ static int get_clock_count(void) {
         } else {
             clk_put(clk);
         }
-
-        pr_info("clock[%d] found\n", count);
         
         count++;
     }
@@ -167,7 +164,7 @@ static int get_clock_name(u32 clock_id, char *name) {
     return 0;
 }
 
-static int get_clock_attributes(u32 clock_id, u32 *enabled, u32 *parent_id, char *clock_name) {
+static int get_clock_attributes(u32 clock_id, u32 *enabled, u32 *parent_id, char *clock_name, u32 *is_valid) {
     struct device_node *provider_np;
     struct clk *clk, *parent_clk;
     const char *name;
@@ -180,10 +177,14 @@ static int get_clock_attributes(u32 clock_id, u32 *enabled, u32 *parent_id, char
     clk = get_clock_by_id(clock_id, provider_np);
     if (IS_ERR(clk)) {
         of_node_put(provider_np);
-        if (PTR_ERR(clk) == -ENOENT)
-            return -ENOENT;
-        return PTR_ERR(clk);
+        *is_valid = 0; // Clock is invalid
+        *enabled = 0;
+        *parent_id = -1;
+        snprintf(clock_name, 64, "invalid_clock_%u", clock_id);
+        return 0;
     }
+    
+    *is_valid = 1; // Clock is valid
 
     // Get clock enable status
     *enabled = __clk_is_enabled(clk) ? 1 : 0;
@@ -210,7 +211,7 @@ static int get_clock_attributes(u32 clock_id, u32 *enabled, u32 *parent_id, char
     clk_put(clk);
     of_node_put(provider_np);
     
-    pr_info("clock[%u] name=%s enabled=%u parent_id=%d\n", clock_id, clock_name, *enabled, *parent_id);
+    pr_info("clock[%u] name=%s enabled=%u parent_id=%d is_valid=%u\n", clock_id, clock_name, *enabled, *parent_id, *is_valid);
     return 0;
 }
 
@@ -319,7 +320,9 @@ static int hvisor_scmi_clock_ioctl(struct hvisor_scmi_clock_args __user *user_ar
     
     if (copy_from_user(&args, user_args, sizeof(struct hvisor_scmi_clock_args)))
         return -EFAULT;
-        
+    
+    pr_info("SCMI clock ioctl, subcmd=%d\n", args.subcmd);
+
     switch (args.subcmd) {
     case HVISOR_SCMI_CLOCK_GET_COUNT: {
         int ret = get_clock_count();
@@ -331,13 +334,12 @@ static int hvisor_scmi_clock_ioctl(struct hvisor_scmi_clock_args __user *user_ar
         return 0;
     }
     case HVISOR_SCMI_CLOCK_GET_ATTRIBUTES: {
-        u32 enabled, parent_id;
+        u32 enabled, parent_id, is_valid;
         char clock_name[64];
-        int ret = get_clock_attributes(args.u.clock_attr.clock_id, &enabled, &parent_id, clock_name);
-        if (ret < 0)
-            return ret;
+        int ret = get_clock_attributes(args.u.clock_attr.clock_id, &enabled, &parent_id, clock_name, &is_valid);
         args.u.clock_attr.enabled = enabled;
         args.u.clock_attr.parent_id = parent_id;
+        args.u.clock_attr.is_valid = is_valid;
         strncpy(args.u.clock_attr.clock_name, clock_name, 63);
         args.u.clock_attr.clock_name[63] = '\0';
         if (copy_to_user(&user_args->u.clock_attr, &args.u.clock_attr, sizeof(args.u.clock_attr)))

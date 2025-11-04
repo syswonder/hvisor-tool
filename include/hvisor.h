@@ -101,6 +101,7 @@ struct hvisor_scmi_clock_args {
             __u32 enabled;
             __u32 parent_id;
             char clock_name[64];
+            __u32 is_valid;     /* Whether the clock is valid */
         } clock_attr;      /* For GET_ATTRIBUTES */
         struct {
             __u32 clock_id;
