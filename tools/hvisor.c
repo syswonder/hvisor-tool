@@ -26,6 +26,7 @@
 #include "hvisor.h"
 #include "log.h"
 #include "safe_cjson.h"
+#include "validate.h"
 #include "virtio.h"
 #include "zone_config.h"
 static void __attribute__((noreturn)) help(int exit_status) {
@@ -36,6 +37,7 @@ static void __attribute__((noreturn)) help(int exit_status) {
     printf("  zone start    <config.json>    Initialize an isolation zone\n");
     printf("  zone shutdown -id <zone_id>   Terminate a zone by ID\n");
     printf("  zone list                      List all active zones\n");
+    printf("  zone validate <config.json>   Validate zone resources\n");
     printf("  virtio start  <virtio.json>    Activate virtio devices\n\n");
     printf("Options:\n");
     printf("  --id <zone_id>    Specify zone ID for shutdown\n");
@@ -700,6 +702,8 @@ int main(int argc, char *argv[]) {
             err = zone_shutdown(argc - 3, &argv[3]);
         } else if (strcmp(argv[2], "list") == 0) {
             err = zone_list(argc - 3, &argv[3]);
+        } else if (strcmp(argv[2], "validate") == 0) {
+            err = zone_validate_command(argc - 3, &argv[3]);
         } else {
             help(1);
         }
