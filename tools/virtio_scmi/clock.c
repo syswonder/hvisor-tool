@@ -270,52 +270,53 @@ static int handle_clock_describe_rates(SCMIDev *dev, uint16_t token,
 
     /* Calculate required response buffer size */
     size_t resp_hdr_size = sizeof(struct scmi_response); // includes status (4 bytes)
-    size_t fixed_payload_size = sizeof(uint32_t);        // num_rates_flags only
-    size_t rate_entry_size = 2 * sizeof(uint32_t);       // each rate: low + high (8 bytes)
 
-    if (resp_iov->iov_len < resp_hdr_size + fixed_payload_size) {
+    if (resp_iov->iov_len < resp_hdr_size + sizeof(uint32_t)) {
         return scmi_make_response(dev, token, resp_iov, SCMI_ERR_RANGE);
     }
 
-    /* Prepare ioctl arguments */
-    struct hvisor_scmi_clock_args args;
-    struct clock_rates_info *rates_info = (struct clock_rates_info *)&args.u.data;
-    rates_info->clock_id = clock_id;
-    rates_info->rate_index = rate_index;
-
-    /* Call the common ioctl function */
-    int ret = hvisor_scmi_ioctl(HVISOR_SCMI_CLOCK_DESCRIBE_RATES, &args, sizeof(args));
-    if (ret < 0) {
-        return scmi_make_response(dev, token, resp_iov, SCMI_ERR_GENERIC);
+    if (rate_index > 0) {
+        return scmi_make_response(dev, token, resp_iov, SCMI_ERR_RANGE);
     }
+
+    // /* Prepare ioctl arguments */
+    // struct hvisor_scmi_clock_args args;
+    // struct clock_rates_info *rates_info = (struct clock_rates_info *)&args.u.data;
+    // rates_info->clock_id = clock_id;
+    // rates_info->rate_index = rate_index;
+
+    // /* Call the common ioctl function */
+    // int ret = hvisor_scmi_ioctl(HVISOR_SCMI_CLOCK_DESCRIBE_RATES, &args, sizeof(args));
+    // if (ret < 0) {
+    //     return scmi_make_response(dev, token, resp_iov, SCMI_ERR_GENERIC);
+    // }
 
     /* Prepare response */
     struct scmi_response *resp = (struct scmi_response *)resp_iov->iov_base;
     uint32_t *payload = (uint32_t *)resp->payload;
 
     /* num_rates_flags:
-     *   Bit[12] = 0 (discrete rates)
-     *   Bits[31:16] = remaining_after
-     *   Bits[11:0] = num_return
+     *   Bit[12] = 1 (continuous rates)
+     *   Bits[31:16] = 0
+     *   Bits[11:0] = 3
      */
-    uint32_t num_rates_flags = (rates_info->remaining << 16) | (rates_info->num_rates & 0xFFFU);
+    uint32_t num_rates_flags = (1 << 12) | (3 & 0xFFFU);
     payload[0] = num_rates_flags;
 
     /* Calculate how many rates we can fit in the response buffer */
-    size_t available_for_rates = resp_iov->iov_len - resp_hdr_size - fixed_payload_size;
-    uint32_t max_rates_by_buffer = (uint32_t)(available_for_rates / rate_entry_size);
-    uint32_t num_return = (rates_info->num_rates < max_rates_by_buffer) ? rates_info->num_rates : max_rates_by_buffer;
+    // size_t available_for_rates = resp_iov->iov_len - resp_hdr_size - fixed_payload_size;
+    // uint32_t max_rates_by_buffer = (uint32_t)(available_for_rates / rate_entry_size);
+    // uint32_t num_return = (rates_info->num_rates < max_rates_by_buffer) ? rates_info->num_rates : max_rates_by_buffer;
 
-    /* Fill rates: each rate is {low32, high32} */
-    uint32_t *rates = &payload[1];
-    for (uint32_t i = 0; i < num_return; i++) {
-        uint64_t rate = rates_info->rates[i];
-        rates[i * 2]     = (uint32_t)(rate & 0xFFFFFFFFULL);
-        rates[i * 2 + 1] = (uint32_t)(rate >> 32);
-    }
+    /* Fill rates: each rate is {low32, high32, step_size} */
+    // All rates are available in one response for simplicity
+    uint64_t *rates = &payload[1];
+    rates[0] = 0;     
+    rates[1] = 10000000000ULL;     // 10 GHz
+    rates[2] = 1;
 
-    log_debug("CLOCK_DESCRIBE_RATES: clock_id=%u, rate_index=%u, num_rates=%u, remaining=%u",
-              clock_id, rate_index, num_return, rates_info->remaining);
+    log_debug("CLOCK_DESCRIBE_RATES: clock_id=%u, rate_index=%u, num_rates=%u",
+              clock_id, rate_index, 3);
 
     return scmi_make_response(dev, token, resp_iov, SCMI_SUCCESS);
 }

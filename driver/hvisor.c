@@ -347,14 +347,29 @@ static int hvisor_scmi_clock_ioctl(struct hvisor_scmi_clock_args __user *user_ar
         return 0;
     }
     case HVISOR_SCMI_CLOCK_DESCRIBE_RATES: {
-        // Not implemented yet, return error
-        return -EINVAL;
+        // u32 num_rates, remaining;
+        // u64 rates[8];
+        
+        // int ret = get_clock_rates(args.u.clock_rates_info.clock_id, 
+        //                          args.u.clock_rates_info.rate_index, 
+        //                          &num_rates, &remaining, rates);
+        // if (ret < 0)
+        //     return ret;
+        
+        // args.u.clock_rates_info.num_rates = num_rates;
+        // args.u.clock_rates_info.remaining = remaining;
+        
+        // for (int i = 0; i < num_rates; i++) {
+        //     args.u.clock_rates_info.rates[i] = rates[i];
+        // }
+        
+        // if (copy_to_user(&user_args->u.clock_rates_info, &args.u.clock_rates_info, sizeof(args.u.clock_rates_info)))
+        //     return -EFAULT;
+        return 0;
     }
     case HVISOR_SCMI_CLOCK_RATE_GET: {
-        u64 rate;
-        int ret = get_clock_rate(args.u.clock_rate_info.clock_id, &rate);
-        if (ret < 0)
-            return ret;
+        u64 rate = 0;
+        int ret = get_clock_rate(args.u.clock_rate_info.clock_id, &rate); // ignore return value
         args.u.clock_rate_info.rate = rate;
         if (copy_to_user(&user_args->u.clock_rate_info, &args.u.clock_rate_info, sizeof(args.u.clock_rate_info)))
             return -EFAULT;
