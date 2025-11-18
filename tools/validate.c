@@ -63,8 +63,10 @@ static int locate_zone_dts(const char *platform_dir, const char *json_dir,
                            const char *json_base, const char *zone_name,
                            uint32_t zone_id, char *out, size_t len);
 
-static inline bool range_within(unsigned long long start, unsigned long long size,
-                                unsigned long long base, unsigned long long end) {
+static inline bool range_within(unsigned long long start,
+                                unsigned long long size,
+                                unsigned long long base,
+                                unsigned long long end) {
     unsigned long long range_end;
     if (!size)
         return false;
@@ -114,7 +116,8 @@ static int join_path(const char *dir, const char *leaf, char *out, size_t len) {
     if (!dir || !leaf || !out)
         return -1;
     size_t dir_len = strlen(dir);
-    const char *fmt = (dir_len > 0 && dir[dir_len - 1] == '/') ? "%s%s" : "%s/%s";
+    const char *fmt =
+        (dir_len > 0 && dir[dir_len - 1] == '/') ? "%s%s" : "%s/%s";
     if (snprintf(out, len, fmt, dir, leaf) >= (int)len)
         return -1;
     return 0;
@@ -276,7 +279,8 @@ static int derive_cpus_from_mpidr(const char *buf, unsigned int *count) {
     return 0;
 }
 
-static int board_parse_physmem(const char *buf, struct cfgchk_board_info *board) {
+static int board_parse_physmem(const char *buf,
+                               struct cfgchk_board_info *board) {
     char tuples[4096];
     char *token;
     char *saveptr;
@@ -312,16 +316,16 @@ static int board_parse_physmem(const char *buf, struct cfgchk_board_info *board)
             continue;
         }
         if (board->physmem_count >= CFGCHK_MAX_PHYSMEM) {
-            log_warn("BOARD_PHYSMEM_LIST exceeds limit (%u)", CFGCHK_MAX_PHYSMEM);
+            log_warn("BOARD_PHYSMEM_LIST exceeds limit (%u)",
+                     CFGCHK_MAX_PHYSMEM);
             break;
         }
         struct cfgchk_physmem_range *pm =
             &board->physmem[board->physmem_count++];
         pm->start = start;
         pm->end = end;
-        pm->type = (strstr(fields[2], "Normal") != NULL)
-                       ? CFGCHK_MEM_RAM
-                       : CFGCHK_MEM_IO;
+        pm->type = (strstr(fields[2], "Normal") != NULL) ? CFGCHK_MEM_RAM
+                                                         : CFGCHK_MEM_IO;
         pm->rsvd = 0;
         token = strtok_r(NULL, "()", &saveptr);
     }
@@ -334,7 +338,8 @@ static int parse_board_mpidr(const char *buf, struct cfgchk_board_info *board) {
     char *token;
     if (parse_symbol_list(buf, "BOARD_MPIDR_MAPPINGS", '[', ']', list,
                           sizeof(list)) != 0) {
-        log_warn("BOARD_MPIDR_MAPPINGS not found, CPU<->MPIDR mapping fallback");
+        log_warn(
+            "BOARD_MPIDR_MAPPINGS not found, CPU<->MPIDR mapping fallback");
         return 0;
     }
     token = strtok_r(list, ",", &saveptr);
@@ -382,8 +387,7 @@ static int parse_board_root_cpus(const char *buf,
     token = strtok_r(expr, "|", &saveptr);
     while (token) {
         unsigned long long cpu;
-        if (parse_cpu_expr_token(trim_whitespace(token), &cpu) == 0 &&
-            cpu < 64)
+        if (parse_cpu_expr_token(trim_whitespace(token), &cpu) == 0 && cpu < 64)
             board->root_cpu_bitmap |= 1ULL << cpu;
         token = strtok_r(NULL, "|", &saveptr);
     }
@@ -491,7 +495,8 @@ static int parse_zone_json(const char *path, struct cfgchk_zone_summary *zone,
         cJSON *type = SAFE_CJSON_GET_OBJECT_ITEM(region, "type");
         cJSON *start = SAFE_CJSON_GET_OBJECT_ITEM(region, "physical_start");
         cJSON *size = SAFE_CJSON_GET_OBJECT_ITEM(region, "size");
-        if (!cJSON_IsString(type) || (!cJSON_IsString(start) && !cJSON_IsNumber(start)) ||
+        if (!cJSON_IsString(type) ||
+            (!cJSON_IsString(start) && !cJSON_IsNumber(start)) ||
             (!cJSON_IsString(size) && !cJSON_IsNumber(size))) {
             log_warn("%s: malformed memory region entry", path);
             continue;
@@ -520,8 +525,7 @@ static int parse_zone_json(const char *path, struct cfgchk_zone_summary *zone,
         mr->flags = 0;
         if (mr->type == CFGCHK_MEM_VIRTIO &&
             zone->virtio_count < CFGCHK_MAX_VIRTIO) {
-            struct cfgchk_virtio_desc *vd =
-                &zone->virtio[zone->virtio_count++];
+            struct cfgchk_virtio_desc *vd = &zone->virtio[zone->virtio_count++];
             vd->base = mr->start;
             vd->size = mr->size;
             vd->irq = 0;
@@ -538,8 +542,7 @@ static int parse_zone_json(const char *path, struct cfgchk_zone_summary *zone,
         zone->irqs[zone->irq_count++] = (uint32_t)irq->valuedouble;
     }
 
-    for (uint32_t i = 0;
-         i < zone->virtio_count && i < zone->irq_count; ++i) {
+    for (uint32_t i = 0; i < zone->virtio_count && i < zone->irq_count; ++i) {
         zone->virtio[i].irq = zone->irqs[i];
     }
 
@@ -601,8 +604,7 @@ static int mpidr_to_cpu(const struct cfgchk_board_info *board,
         return -1;
     for (uint32_t i = 0; i < board->total_cpus && i < CFGCHK_MAX_CPUS; ++i) {
         if (board->mpidr_map[i] == mpidr ||
-            (board->mpidr_map[i] & 0xffffffffULL) ==
-                (mpidr & 0xffffffffULL)) {
+            (board->mpidr_map[i] & 0xffffffffULL) == (mpidr & 0xffffffffULL)) {
             *cpu_out = i;
             return 0;
         }
@@ -965,7 +967,8 @@ static int locate_zone_dts(const char *platform_dir, const char *json_dir,
                 return ensure_realpath(candidate, out, len);
         }
         if (zone_name && zone_name[0]) {
-            if (join_path(base_dir, zone_name, candidate, sizeof(candidate)) == 0) {
+            if (join_path(base_dir, zone_name, candidate, sizeof(candidate)) ==
+                0) {
                 size_t l = strlen(candidate);
                 if (l < sizeof(candidate) - 5) {
                     strcpy(candidate + l, ".dts");
