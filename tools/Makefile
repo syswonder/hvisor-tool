@@ -24,7 +24,7 @@ endif
 ifeq ($(ARCH), loongarch)
 toolchain := $(CCARCH)-unknown-linux-$(LIBC)
 else
-toolchain := $(CCARCH)-linux-$(LIBC)
+toolchain := $(CCARCH)-none-linux-$(LIBC)
 endif
 
 CFLAGS := -Wall -Wextra -DLOG_USE_COLOR -DHLOG=$(LOG) --sysroot=$(ROOT)

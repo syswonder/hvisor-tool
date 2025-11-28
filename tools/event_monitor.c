@@ -13,8 +13,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "event_monitor.h"
-#include "log.h"
+#include "include/event_monitor.h"
+#include "include/log.h"
 
 static int epoll_fd;
 static int events_num;

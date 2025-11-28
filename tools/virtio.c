@@ -396,21 +396,21 @@ void virtqueue_set_desc_table(VirtQueue *vq) {
     int zone_id = vq->dev->zone_id;
     log_debug("zone %d set dev %s desc table ipa at %#x", zone_id,
               virtio_device_type_to_string(vq->dev->type), vq->desc_table_addr);
-    vq->desc_table = (VirtqDesc *)get_virt_addr(vq->desc_table_addr, zone_id);
+    vq->desc_table = (VirtqDesc *)get_virt_addr((void*)vq->desc_table_addr, zone_id);
 }
 
 void virtqueue_set_avail(VirtQueue *vq) {
     int zone_id = vq->dev->zone_id;
     log_debug("zone %d set dev %s avail ring ipa at %#x", zone_id,
               virtio_device_type_to_string(vq->dev->type), vq->avail_addr);
-    vq->avail_ring = (VirtqAvail *)get_virt_addr(vq->avail_addr, zone_id);
+    vq->avail_ring = (VirtqAvail *)get_virt_addr((void*)vq->avail_addr, zone_id);
 }
 
 void virtqueue_set_used(VirtQueue *vq) {
     int zone_id = vq->dev->zone_id;
     log_debug("zone %d set dev %s used ring ipa at %#x", zone_id,
               virtio_device_type_to_string(vq->dev->type), vq->used_addr);
-    vq->used_ring = (VirtqUsed *)get_virt_addr(vq->used_addr, zone_id);
+    vq->used_ring = (VirtqUsed *)get_virt_addr((void*)vq->used_addr, zone_id);
 }
 
 // record one descriptor to iov.
@@ -1242,11 +1242,11 @@ int virtio_start_from_json(char *json_path) {
         for (int j = 0; j < num_mems; j++) {
             cJSON *mem_region =
                 SAFE_CJSON_GET_ARRAY_ITEM(memory_region_json, j);
-            zone0_ipa =
+            zone0_ipa = (void *)
                 strtoull(SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zone0_ipa")
                              ->valuestring,
                          NULL, 16);
-            zonex_ipa =
+            zonex_ipa =(void *)
                 strtoull(SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zonex_ipa")
                              ->valuestring,
                          NULL, 16);
@@ -1275,9 +1275,9 @@ int virtio_start_from_json(char *json_path) {
                 err = -1;
                 goto err_out;
             }
-            zone_mem[zone_id][j][VIRT_ADDR] = virt_addr;
-            zone_mem[zone_id][j][ZONE0_IPA] = zone0_ipa;
-            zone_mem[zone_id][j][ZONEX_IPA] = zonex_ipa;
+            zone_mem[zone_id][j][VIRT_ADDR] = (__u64)virt_addr;
+            zone_mem[zone_id][j][ZONE0_IPA] = (__u64)zone0_ipa;
+            zone_mem[zone_id][j][ZONEX_IPA] = (__u64)zonex_ipa;
             zone_mem[zone_id][j][MEM_SIZE] = mem_size;
         }
 

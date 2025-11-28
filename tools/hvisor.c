@@ -28,6 +28,8 @@
 #include "safe_cjson.h"
 #include "virtio.h"
 #include "zone_config.h"
+
+#define __u64 uint64_t
 static void __attribute__((noreturn)) help(int exit_status) {
     printf("Hypervisor Management Tool\n\n");
     printf("Usage:\n");
