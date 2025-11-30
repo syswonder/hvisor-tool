@@ -23,8 +23,10 @@ endif
 
 ifeq ($(ARCH), loongarch)
 toolchain := $(CCARCH)-unknown-linux-$(LIBC)
-else
+else ifeq ($(ARCH), arm64)
 toolchain := $(CCARCH)-none-linux-$(LIBC)
+else
+toolchain := $(CCARCH)-linux-$(LIBC)
 endif
 
 CFLAGS := -Wall -Wextra -DLOG_USE_COLOR -DHLOG=$(LOG) --sysroot=$(ROOT)
@@ -49,7 +51,7 @@ include $(sources:.c=.d)
 
 ifeq ($(DEBUG), y)
 	CFLAGS += -g -O0
-else 
+else
 	CFLAGS += -O2
 endif
 
@@ -59,7 +61,7 @@ OBJDUMP := $(toolchain)-objdump
 
 ifeq ($(ARCH), arm64)
 	ifeq ($(VIRTIO_GPU), y)
-		include_dirs += -I/usr/$(toolchain)/include -I/usr/$(toolchain)/include/libdrm -L/usr/$(toolchain)/lib -ldrm 
+		include_dirs += -I/usr/$(toolchain)/include -I/usr/$(toolchain)/include/libdrm -L/usr/$(toolchain)/lib -ldrm
 	endif
 else ifeq ($(ARCH), riscv)
 	CFLAGS += -static
