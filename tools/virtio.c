@@ -90,7 +90,7 @@ int get_zone_ram_index(void *zonex_ipa, int zone_id) {
         ;
         if ((uintptr_t)zonex_ipa >= zone_mem[zone_id][i][ZONEX_IPA] &&
             (uintptr_t)zonex_ipa < zone_mem[zone_id][i][ZONEX_IPA] +
-                            zone_mem[zone_id][i][MEM_SIZE]) {
+                                       zone_mem[zone_id][i][MEM_SIZE]) {
             return i;
         }
     }
