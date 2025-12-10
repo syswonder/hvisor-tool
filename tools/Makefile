@@ -45,7 +45,7 @@ ifeq ($(LIBC), musl)
 include_dirs += -I./compat/
 endif
 
-LDFLAGS := -pthread -static
+LDFLAGS := -lpthread -static
 
 # LIBS := -L$(ROOT)/usr/lib/$(toolchain) -L$(ROOT)/lib
 # LIBS := -L/opt/aarch64-linux-musl-cross/aarch64-linux-musl -L/opt/aarch64-linux-musl-cross/lib
