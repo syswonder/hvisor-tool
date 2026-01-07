@@ -28,6 +28,7 @@ ConsoleDev *init_console_dev() {
     dev->config.cols = 80;
     dev->config.rows = 25;
     dev->master_fd = -1;
+    dev->log_fd = -1;
     dev->rx_ready = -1;
     dev->event = NULL;
     return dev;
@@ -129,6 +130,14 @@ int virtio_console_init(VirtIODevice *vdev) {
         log_error("Failed to set nonblocking mode, fd closed!");
     }
 
+    // add datetime to filename of log file
+    char log_filename[256];
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    snprintf(log_filename, sizeof(log_filename), "console-%ld.log", tv.tv_sec);
+    dev->log_fd = open(log_filename,
+                      O_WRONLY | O_CREAT | O_APPEND, 0644);
+
     dev->event =
         add_event(dev->master_fd, EPOLLIN, virtio_console_event_handler, vdev);
 
@@ -189,6 +198,12 @@ static void virtq_tx_handle_one_request(ConsoleDev *dev, VirtQueue *vq) {
         return;
     }
 
+    // write to log_fd
+    len = writev(dev->log_fd, iov, n);
+    if (len < 0) {
+        log_error("Failed to write to log_fd, errno is %d", errno);
+    }
+
     len = writev(dev->master_fd, iov, n);
     if (len < 0) {
         log_error("Failed to write to console, errno is %d", errno);
@@ -213,6 +228,7 @@ int virtio_console_txq_notify_handler(VirtIODevice *vdev, VirtQueue *vq) {
 void virtio_console_close(VirtIODevice *vdev) {
     ConsoleDev *dev = vdev->dev;
     close(dev->master_fd);
+    close(dev->log_fd);
     free(dev->event);
     free(dev);
     free(vdev->vqs);
