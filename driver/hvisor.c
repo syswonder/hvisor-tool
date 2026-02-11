@@ -34,12 +34,28 @@
 /* Clock provider phandle, hardcoded as requested */
 #define CLOCK_PROVIDER_PHANDLE 2
 
+/* Reset provider phandle, hardcoded as requested */
+#define RESET_PROVIDER_PHANDLE 2
+
 extern bool __clk_is_enabled(const struct clk *clk);
 extern const char *__clk_get_name(const struct clk *clk);
 extern unsigned long clk_get_rate(struct clk *clk);
 extern int clk_set_rate(struct clk *clk, unsigned long rate);
 extern int clk_prepare_enable(struct clk *clk);
 extern void clk_disable_unprepare(struct clk *clk);
+
+/* Reset controller functions */
+#include <linux/reset.h>
+#include <linux/reset-domains.h>
+
+extern struct reset_control *reset_control_get(struct device *dev, const char *id);
+extern struct reset_control *reset_control_get_optional(struct device *dev, const char *id);
+extern struct reset_control *devm_reset_control_get(struct device *dev, const char *id);
+extern void reset_control_put(struct reset_control *rstc);
+extern int reset_control_reset(struct reset_control *rstc);
+extern int reset_control_assert(struct reset_control *rstc);
+extern int reset_control_deassert(struct reset_control *rstc);
+extern struct reset_control *get_reset_domain_by_id(unsigned int reset_id);
 
 /**
  * get_clock_provider_node - 获取时钟提供者节点
@@ -94,6 +110,73 @@ static int get_clock_count(void) {
     of_node_put(provider_np);
     pr_info("total clocks = %d\n", count);
     return count;
+}
+
+/**
+ * get_reset_provider_node - 获取复位提供者节点
+ *
+ * 返回: 成功时返回复位提供者节点指针，失败时返回NULL
+ */
+static struct device_node *get_reset_provider_node(void) {
+    struct device_node *provider_np = of_find_node_by_phandle(RESET_PROVIDER_PHANDLE);
+    if (!provider_np) {
+        pr_err("Failed to find reset provider node\n");
+    }
+    return provider_np;
+}
+
+static struct reset_control *get_reset_by_id(u32 reset_id, struct device_node *provider_np) {
+    struct reset_control *rstc;
+    
+    // Use the reset-domains interface to get reset control by ID
+    rstc = get_reset_domain_by_id(reset_id);
+    if (IS_ERR(rstc)) {
+        pr_err("Failed to get reset control for ID %u: %ld\n", reset_id, PTR_ERR(rstc));
+        return rstc;
+    }
+    
+    return rstc;
+}
+
+static int reset_domain(u32 reset_id, u32 flags, u32 reset_type, u32 reset_scope) {
+    struct reset_control *rstc;
+    int ret = 0;
+    
+    // Get the reset control by ID
+    rstc = get_reset_domain_by_id(reset_id);
+    if (IS_ERR(rstc)) {
+        pr_err("Failed to get reset control for ID %u: %ld\n", reset_id, PTR_ERR(rstc));
+        return PTR_ERR(rstc);
+    }
+    
+    // Perform the requested reset operation
+    switch (reset_type) {
+    case 0: // RESET_TYPE_RESET
+        pr_info("Resetting domain %u\n", reset_id);
+        ret = reset_control_reset(rstc);
+        break;
+    case 1: // RESET_TYPE_ASSERT
+        pr_info("Asserting reset domain %u\n", reset_id);
+        ret = reset_control_assert(rstc);
+        break;
+    case 2: // RESET_TYPE_DEASSERT
+        pr_info("Deasserting reset domain %u\n", reset_id);
+        ret = reset_control_deassert(rstc);
+        break;
+    default:
+        pr_err("Invalid reset type %u\n", reset_type);
+        ret = -EINVAL;
+        break;
+    }
+    
+    if (ret) {
+        pr_err("Reset operation failed for domain %u: %d\n", reset_id, ret);
+    }
+    
+    // Release the reset control
+    reset_control_put(rstc);
+    
+    return ret;
 }
 
 
@@ -408,6 +491,23 @@ static int hvisor_scmi_clock_ioctl(struct hvisor_scmi_clock_args __user *user_ar
     }
 }
 
+static int hvisor_scmi_reset_ioctl(struct hvisor_scmi_reset_args __user *user_args) {
+    struct hvisor_scmi_reset_args args;
+    
+    if (copy_from_user(&args, user_args, sizeof(struct hvisor_scmi_reset_args)))
+        return -EFAULT;
+
+    switch (args.subcmd) {
+    case HVISOR_SCMI_RESET_RESET: {
+        int ret = reset_domain(args.u.reset_info.domain_id, args.u.reset_info.flags, 
+                              args.u.reset_info.reset_type, args.u.reset_info.reset_scope);
+        return ret;
+    }
+    default:
+        return -EINVAL;
+    }
+}
+
 struct virtio_bridge *virtio_bridge;
 int virtio_irq = -1;
 static struct task_struct *task = NULL;
@@ -611,6 +711,9 @@ static long hvisor_ioctl(struct file *file, unsigned int ioctl,
         break;
     case HVISOR_SCMI_CLOCK_IOCTL:
         err = hvisor_scmi_clock_ioctl((struct hvisor_scmi_clock_args __user *)arg);
+        break;
+    case HVISOR_SCMI_RESET_IOCTL:
+        err = hvisor_scmi_reset_ioctl((struct hvisor_scmi_reset_args __user *)arg);
         break;
 #ifdef LOONGARCH64
     case HVISOR_CLEAR_INJECT_IRQ:

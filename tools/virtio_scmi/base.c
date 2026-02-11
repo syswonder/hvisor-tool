@@ -22,6 +22,7 @@
 static int get_protocol_list(uint32_t *buffer, int skip, int max)
 {
     int num = scmi_get_protocol_count();
+    log_info("Total protocols: %d, skip: %d, max: %d", num, skip, max);
     int remaining = num - skip;
     
     if (remaining <= 0) {
@@ -33,6 +34,7 @@ static int get_protocol_list(uint32_t *buffer, int skip, int max)
     buffer[0] = count;
 
     for (int i = 0; i < count; i++) {
+        log_info("Protocol %d: %u", skip + i, scmi_get_protocol_by_index(skip + i)->id);
         if (i % 4 == 0) buffer[i/4+1] = 0;
         buffer[i/4+1] |= scmi_get_protocol_by_index(skip + i)->id << ((i % 4) * 8);
     }
@@ -119,9 +121,10 @@ static int handle_base_protocol_list(SCMIDev *dev, uint16_t token,
     uint32_t *protocols = (uint32_t *)resp->payload;
     
     scmi_make_response(dev, token, resp_iov, SCMI_SUCCESS);
-    
+
     int count = get_protocol_list(protocols, skip,
                                 resp_iov->iov_len - sizeof(struct scmi_response));
+    log_warn("get_protocol_list returned count=%d", count);
     if (count < 0) {
         resp->status = -count;
         log_error("Invalid skip value: %u", skip);

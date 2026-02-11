@@ -72,6 +72,7 @@ typedef struct ioctl_zone_list_args zone_list_args_t;
 #define HVISOR_ZONE_LIST _IOR(1, 5, zone_list_args_t *)
 #define HVISOR_CONFIG_CHECK _IOR(1, 6, __u64 *)
 #define HVISOR_SCMI_CLOCK_IOCTL _IOWR(1, 32, struct hvisor_scmi_clock_args)
+#define HVISOR_SCMI_RESET_IOCTL _IOWR(1, 33, struct hvisor_scmi_reset_args)
 
 #define HVISOR_HC_INIT_VIRTIO 0
 #define HVISOR_HC_FINISH_REQ 1
@@ -89,6 +90,9 @@ typedef struct ioctl_zone_list_args zone_list_args_t;
 #define HVISOR_SCMI_CLOCK_CONFIG_GET 0x06
 #define HVISOR_SCMI_CLOCK_CONFIG_SET 0x07
 #define HVISOR_SCMI_CLOCK_NAME_GET 0x08
+
+/* SCMI Reset Subcommands */
+#define HVISOR_SCMI_RESET_RESET 0x01
 
 /* SCMI Clock ioctl argument structure */
 struct hvisor_scmi_clock_args {
@@ -129,6 +133,21 @@ struct hvisor_scmi_clock_args {
             __u32 clock_id;
             char name[64];
         } clock_name_info; /* For NAME_GET */
+        __u8 data[0];      /* For other commands */
+    } u;
+};
+
+/* SCMI Reset ioctl argument structure */
+struct hvisor_scmi_reset_args {
+    __u32 subcmd;   /* Subcommand ID */
+    __u32 data_len; /* Length of data buffer */
+    union {
+        struct {
+            __u32 domain_id;
+            __u32 flags;
+            __u32 reset_type;
+            __u32 reset_scope;
+        } reset_info; /* For RESET */
         __u8 data[0];      /* For other commands */
     } u;
 };

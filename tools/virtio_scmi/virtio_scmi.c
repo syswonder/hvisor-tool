@@ -22,10 +22,12 @@ SCMIDev *init_scmi_dev() {
     if (dev) {
         dev->fd = -1;
         /* Initialize supported protocols */
-        extern void virtio_scmi_base_init(void);
-        extern void virtio_scmi_clock_init(void);
+        extern int virtio_scmi_base_init(void);
+        extern int virtio_scmi_clock_init(void);
+        extern int virtio_scmi_reset_init(void);
         virtio_scmi_base_init();
         virtio_scmi_clock_init();
+        virtio_scmi_reset_init();
     }
     return dev;
 }

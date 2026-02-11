@@ -91,7 +91,7 @@ int scmi_register_protocol(const struct scmi_protocol *proto) {
 
     protocols[protocol_count] = proto;
 
-    log_debug("Registered protocol %u at index %d", proto->id, protocol_count);
+    log_info("Registered protocol %u at index %d", proto->id, protocol_count);
     protocol_count++;
     return SCMI_SUCCESS;
 }

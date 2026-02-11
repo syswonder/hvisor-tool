@@ -203,7 +203,6 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
         break;
 
     case VirtioTSCMI:
-        log_warn("virtio scmi is not fully supported yet");
         vdev->regs.dev_feature = SCMI_SUPPORTED_FEATURES;
         vdev->dev = init_scmi_dev();
         init_virtio_queue(vdev, dev_type);

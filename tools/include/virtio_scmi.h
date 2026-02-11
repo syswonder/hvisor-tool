@@ -89,6 +89,12 @@
 /* -------------------------- SCMI Protocol IDs -------------------------- */
 #define SCMI_PROTO_ID_BASE     0x10    /* Base Protocol */
 #define SCMI_PROTO_ID_CLOCK    0x14    /* Clock Protocol */
+#define SCMI_PROTO_ID_RESET    0x16    /* Reset Protocol */
+
+/* -------------------------- SCMI Reset Protocol Message IDs ---------- */
+#define SCMI_RESET_MSG_RESET_ATTRIBUTES         0x3  /* Reset domain attributes */
+#define SCMI_RESET_MSG_RESET                     0x4  /* Reset domain */
+#define SCMI_RESET_MSG_RESET_NOTIFY              0x5  /* Reset notify */
 
 /* -------------------------- SCMI Common Protocol Message IDs -------------------------- */
 #define SCMI_COMMON_MSG_VERSION                        0x0  /* Version request */
