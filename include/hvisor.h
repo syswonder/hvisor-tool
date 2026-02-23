@@ -145,8 +145,7 @@ struct hvisor_scmi_reset_args {
         struct {
             __u32 domain_id;
             __u32 flags;
-            __u32 reset_type;
-            __u32 reset_scope;
+            __u32 reset_state;
         } reset_info; /* For RESET */
         __u8 data[0];      /* For other commands */
     } u;

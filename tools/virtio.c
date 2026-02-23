@@ -693,8 +693,7 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
         log_debug("read VIRTIO_MMIO_QUEUE_READY");
         return vdev->vqs[vdev->regs.queue_sel].ready;
     case VIRTIO_MMIO_INTERRUPT_STATUS:
-    log_info("debug: (%s) current interrupt status is %u", __func__,
-             vdev->regs.interrupt_status);
+        log_debug("read VIRTIO_MMIO_INTERRUPT_STATUS");
 #ifdef LOONGARCH64
         // clear lvz gintc irq injection bit to avoid endless interrupt...
         log_warn(
@@ -843,8 +842,6 @@ void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
                       vdev->type);
         }
         regs->interrupt_status &= !value;
-        log_info("debug: (%s) clearing! interrupt_status -> %d", __func__,
-                 regs->interrupt_status);
         break;
     case VIRTIO_MMIO_STATUS:
         log_debug("write VIRTIO_MMIO_STATUS");

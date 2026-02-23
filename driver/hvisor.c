@@ -27,6 +27,8 @@
 #include <linux/version.h>
 #include <linux/vmalloc.h>
 #include <linux/clk.h>
+#include <linux/delay.h>
+#include <linux/reset.h>
 
 #include "hvisor.h"
 #include "zone_config.h"
@@ -36,6 +38,10 @@
 
 /* Reset provider phandle, hardcoded as requested */
 #define RESET_PROVIDER_PHANDLE 2
+
+#define SCMI_RESET_DEASSERT	     0
+#define SCMI_RESET_RESET	     (1 << 0)
+#define SCMI_RESET_ASSERT        (1 << 1)
 
 extern bool __clk_is_enabled(const struct clk *clk);
 extern const char *__clk_get_name(const struct clk *clk);
@@ -138,7 +144,7 @@ static struct reset_control *get_reset_by_id(u32 reset_id, struct device_node *p
     return rstc;
 }
 
-static int reset_domain(u32 reset_id, u32 flags, u32 reset_type, u32 reset_scope) {
+static int reset_domain(u32 reset_id, u32 flags, u32 reset_state) {
     struct reset_control *rstc;
     int ret = 0;
     
@@ -150,21 +156,35 @@ static int reset_domain(u32 reset_id, u32 flags, u32 reset_type, u32 reset_scope
     }
     
     // Perform the requested reset operation
-    switch (reset_type) {
-    case 0: // RESET_TYPE_RESET
-        pr_info("Resetting domain %u\n", reset_id);
-        ret = reset_control_reset(rstc);
-        break;
-    case 1: // RESET_TYPE_ASSERT
-        pr_info("Asserting reset domain %u\n", reset_id);
-        ret = reset_control_assert(rstc);
-        break;
-    case 2: // RESET_TYPE_DEASSERT
+    switch (flags) {
+    case SCMI_RESET_DEASSERT:
         pr_info("Deasserting reset domain %u\n", reset_id);
         ret = reset_control_deassert(rstc);
         break;
+    case SCMI_RESET_RESET:
+        pr_info("Resetting domain %u\n", reset_id);
+        ret = reset_control_reset(rstc);
+        if (ret == -ENOTSUPP) {
+            // Fallback to assert + deassert if reset is not supported
+            pr_info("Fallback to assert+deassert for reset domain %u\n", reset_id);
+            ret = reset_control_assert(rstc);
+            if (ret) {
+                pr_err("Failed to assert reset domain %u: %d\n", reset_id, ret);
+                break;
+            }
+            // Add a small delay between assert and deassert
+            udelay(1);
+            ret = reset_control_deassert(rstc);
+            if (ret)
+                pr_err("Failed to deassert reset domain %u: %d\n", reset_id, ret);
+        }
+        break;
+    case SCMI_RESET_ASSERT:
+        pr_info("Asserting reset domain %u\n", reset_id);
+        ret = reset_control_assert(rstc);
+        break;
     default:
-        pr_err("Invalid reset type %u\n", reset_type);
+        pr_err("Invalid reset type %u\n", flags);
         ret = -EINVAL;
         break;
     }
@@ -500,7 +520,7 @@ static int hvisor_scmi_reset_ioctl(struct hvisor_scmi_reset_args __user *user_ar
     switch (args.subcmd) {
     case HVISOR_SCMI_RESET_RESET: {
         int ret = reset_domain(args.u.reset_info.domain_id, args.u.reset_info.flags, 
-                              args.u.reset_info.reset_type, args.u.reset_info.reset_scope);
+                              args.u.reset_info.reset_state);
         return ret;
     }
     default:

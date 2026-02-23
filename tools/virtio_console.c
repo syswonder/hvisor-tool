@@ -182,17 +182,17 @@ static void virtq_tx_handle_one_request(ConsoleDev *dev, VirtQueue *vq) {
     //     log_printf("\n");
     // }
 
-    for (int i = 0; i < n; i++) {
-        log_printf("RAW:[");
-        for (size_t j = 0; j < iov[i].iov_len; j++) {
-            char x = ((char *)iov[i].iov_base)[j];
-            if (x == '\t' || x == '\n' || x == '\r') {
-                x = ' ';
-            }
-            log_printf("%c", x);
-        }
-        log_printf("]\n");
-    }
+    // for (int i = 0; i < n; i++) {
+    //     log_printf("RAW:[");
+    //     for (size_t j = 0; j < iov[i].iov_len; j++) {
+    //         char x = ((char *)iov[i].iov_base)[j];
+    //         if (x == '\t' || x == '\n' || x == '\r') {
+    //             x = ' ';
+    //         }
+    //         log_printf("%c", x);
+    //     }
+    //     log_printf("]\n");
+    // }
 
     if (n < 1) {
         return;
@@ -205,9 +205,9 @@ static void virtq_tx_handle_one_request(ConsoleDev *dev, VirtQueue *vq) {
     }
 
     len = writev(dev->master_fd, iov, n);
-    if (len < 0) {
-        log_error("Failed to write to console, errno is %d", errno);
-    }
+    // if (len < 0) {
+    //     log_error("Failed to write to console, errno is %d", errno);
+    // }
     update_used_ring(vq, idx, 0);
     free(iov);
 }

@@ -34,8 +34,7 @@ struct scmi_msg_resp_reset_attributes {
 struct scmi_msg_req_reset {
     uint32_t domain_id;
     uint32_t flags;               /* Bit 0: async, Bit 1: assert, Bit 2: deassert */
-    uint32_t reset_type;          /* 0: arch reset, 1: impl defined */
-    uint32_t reset_scope;         /* Implementation defined */
+    uint32_t reset_state;          /* 0: arch reset, 1: impl defined */
 };
 
 /* Define reset count macro */
@@ -137,8 +136,6 @@ static int handle_reset_attributes(SCMIDev *dev, uint16_t token,
         return scmi_make_response(dev, token, resp_iov, SCMI_ERR_RANGE);
     }
 
-    // Prepare ioctl arguments
-    struct hvisor_scmi_reset_args args;
     // Map SCMI reset ID to physical reset ID
     phys_rst_id = rk3588_scmi_to_phys_map[domain_id];
 
@@ -169,14 +166,13 @@ static int handle_reset(SCMIDev *dev, uint16_t token,
     
     uint32_t domain_id = reset_req->domain_id;
     uint32_t flags = reset_req->flags;
-    uint32_t reset_type = reset_req->reset_type;
-    uint32_t reset_scope = reset_req->reset_scope;
+    uint32_t reset_state = reset_req->reset_state;
 
     if (!is_valid_reset_id(domain_id)) {
         return scmi_make_response(dev, token, resp_iov, SCMI_ERR_ENTRY);
     }
 
-    bool async = (flags & 0x1) != 0;
+    bool async = (flags & (1 << 2)) != 0;
     // For simplicity, we only support synchronous mode
     if (async) {
         return scmi_make_response(dev, token, resp_iov, SCMI_ERR_SUPPORT);
@@ -187,8 +183,7 @@ static int handle_reset(SCMIDev *dev, uint16_t token,
     // Map SCMI reset ID to physical reset ID
     args.u.reset_info.domain_id = rk3588_scmi_to_phys_map[domain_id];
     args.u.reset_info.flags = flags;
-    args.u.reset_info.reset_type = reset_type;
-    args.u.reset_info.reset_scope = reset_scope;
+    args.u.reset_info.reset_state = reset_state;
 
     // Call the common ioctl function
     int ret = hvisor_scmi_ioctl(HVISOR_SCMI_RESET_RESET, &args, sizeof(args));
@@ -196,8 +191,8 @@ static int handle_reset(SCMIDev *dev, uint16_t token,
         return scmi_make_response(dev, token, resp_iov, SCMI_ERR_GENERIC);
     }
 
-    log_debug("RESET: domain_id=%u, flags=0x%x, reset_type=%u, reset_scope=%u",
-             domain_id, flags, reset_type, reset_scope);
+    log_warn("RESET: domain_id=%u, flags=0x%x, reset_state=%u",
+             domain_id, flags, reset_state);
 
     return scmi_make_response(dev, token, resp_iov, SCMI_SUCCESS);
 }
