@@ -155,6 +155,14 @@ static int reset_domain(u32 reset_id, u32 flags, u32 reset_state) {
         return PTR_ERR(rstc);
     }
     
+    // Acquire the reset control
+    ret = reset_control_acquire(rstc);
+    if (ret) {
+        pr_err("Failed to acquire reset domain %u: %d\n", reset_id, ret);
+        reset_control_put(rstc);
+        return ret;
+    }
+    
     // Perform the requested reset operation
     switch (flags) {
     case SCMI_RESET_DEASSERT:
@@ -189,16 +197,18 @@ static int reset_domain(u32 reset_id, u32 flags, u32 reset_state) {
         break;
     }
     
+    // Release the reset control
+    reset_control_release(rstc);
+    
     if (ret) {
         pr_err("Reset operation failed for domain %u: %d\n", reset_id, ret);
     }
     
-    // Release the reset control
+    // Put the reset control
     reset_control_put(rstc);
     
     return ret;
 }
-
 
 
 static int get_clock_config(u32 clock_id, u32 *config, u32 *extended_config_val) {
