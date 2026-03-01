@@ -18,7 +18,7 @@
 #define MEM_TYPE_VIRTIO 2
 
 #define CONFIG_MAX_MEMORY_REGIONS 64
-#define CONFIG_MAX_INTERRUPTS 32
+#define CONFIG_MAX_INTERRUPTS 128
 #define CONFIG_MAX_ZONES 32
 #define CONFIG_NAME_MAXLEN 32
 #define CONFIG_MAX_PCI_DEV 32
@@ -123,7 +123,7 @@ struct ivc_config {
 };
 typedef struct ivc_config ivc_config_t;
 
-#define CONFIG_MAGIC_VERSION 0x03
+#define CONFIG_MAGIC_VERSION 0x04
 
 // Every time you change the struct, you should also change the
 // `CONFIG_MAGIC_VERSION`
