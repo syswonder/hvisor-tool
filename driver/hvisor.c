@@ -412,8 +412,6 @@ static int set_clock_config(u32 clock_id, u32 config) {
         ret = clk_prepare_enable(clk);
         if (ret) {
             pr_err("Failed to enable clock[%u], error=%d\n", clock_id, ret);
-        } else {
-            pr_info("clock[%u] enabled\n", clock_id);
         }
     } else {
         // Disable clock
