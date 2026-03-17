@@ -573,17 +573,17 @@ static int hvisor_finish_req(void) {
 
 //     size = PAGE_ALIGN(size);
 
-//     // 使用 ioremap 映射物理地址
+//     // Use ioremap to map physical address
 //     vaddr = ioremap_cache(phys_start, size);
 //     if (!vaddr) {
 //         pr_err("hvisor.ko: failed to ioremap image\n");
 //         return -ENOMEM;
 //     }
 
-//     // flush I-cache（ARM64 平台中 flush_icache_range 是对 D/I 的处理）
+//     // flush I-cache (flush_icache_range handles both D/I cache on ARM64 platform)
 //     flush_icache_range((unsigned long)vaddr, (unsigned long)vaddr + size);
 
-//     // 解除映射
+//     // Unmap
 //     iounmap(vaddr);
 //     return err;
 // }
@@ -633,7 +633,7 @@ static int hvisor_zone_start(zone_config_t __user *arg) {
     // flush_cache(zone_config->kernel_load_paddr, zone_config->kernel_size);
     // flush_cache(zone_config->dtb_load_paddr, zone_config->dtb_size);
 
-    pr_info("hvisor.ko: invoking hypercall to start the zone\n");
+    pr_debug("hvisor.ko: invoking hypercall to start the zone\n");
 
     err = hvisor_call(HVISOR_HC_START_ZONE, __pa(zone_config),
                       sizeof(zone_config_t));
@@ -766,7 +766,7 @@ static int hvisor_map(struct file *filp, struct vm_area_struct *vma) {
                               vma->vm_end - vma->vm_start, vma->vm_page_prot);
         if (err)
             return err;
-        pr_info("virtio bridge mmap succeed!\n");
+        pr_debug("virtio bridge mmap succeed!\n");
     } else {
         size_t size = vma->vm_end - vma->vm_start;
         // TODO: add check for non root memory region.
@@ -780,7 +780,7 @@ static int hvisor_map(struct file *filp, struct vm_area_struct *vma) {
                               vma->vm_page_prot);
         if (err)
             return err;
-        pr_info("non root region mmap succeed!\n");
+        pr_debug("non root region mmap succeed!\n");
     }
     return 0;
 }
@@ -811,7 +811,7 @@ static irqreturn_t virtio_irq_handler(int irq, void *dev_id) {
     info.si_int = 1;
     // Send signal SIGHVI to hvisor user task
     if (task != NULL) {
-        // pr_info("send signal to hvisor device\n");
+        // pr_debug("send signal to hvisor device\n");
 #if (LINUX_VERSION_CODE <= KERNEL_VERSION(4, 20, 0))
         if (send_sig_info(SIGHVI, (struct siginfo *)&info, task) < 0) {
             pr_err("Unable to send signal\n");
@@ -872,7 +872,7 @@ static int __init hvisor_init(void) {
 
     kfree(irq);
 #endif /* X86_64 */
-    pr_info("hvisor init done!!!\n");
+    pr_debug("hvisor init done!!!\n");
     return 0;
 err_out:
     pr_err("hvisor cannot register IRQ, err is %d\n", err);
@@ -893,7 +893,7 @@ static void __exit hvisor_exit(void) {
         free_pages((unsigned long)virtio_bridge, 0);
     }
     misc_deregister(&hvisor_misc_dev);
-    pr_info("hvisor exit!!!\n");
+    pr_debug("hvisor exit!!!\n");
 }
 
 module_init(hvisor_init);

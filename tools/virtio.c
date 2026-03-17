@@ -87,10 +87,11 @@ int set_nonblocking(int fd) {
 }
 
 int get_zone_ram_index(void *zonex_ipa, int zone_id) {
+    uintptr_t addr = (uintptr_t)zonex_ipa;
     for (int i = 0; i < MAX_RAMS; i++) {
         if (zone_mem[zone_id][i][MEM_SIZE] == 0)
             continue;
-        ;
+        
         if ((uintptr_t)zonex_ipa >= zone_mem[zone_id][i][ZONEX_IPA] &&
             (uintptr_t)zonex_ipa < zone_mem[zone_id][i][ZONEX_IPA] +
                                        zone_mem[zone_id][i][MEM_SIZE]) {
@@ -183,11 +184,7 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
     vdev->zone_id = zone_id;
     vdev->irq_id = irq_id;
     vdev->type = dev_type;
-
-    log_info("debug: vdev->base_addr is %lx, vdev->len is %lx, vdev->zone_id "
-             "is %d, vdev->irq_id is %d",
-             vdev->base_addr, vdev->len, vdev->zone_id, vdev->irq_id);
-
+    
     switch (dev_type) {
     case VirtioTBlock:
         vdev->regs.dev_feature = BLK_SUPPORTED_FEATURES;
@@ -641,9 +638,11 @@ static const char *virtio_mmio_reg_name(uint64_t offset) {
 }
 
 uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
-    log_debug("virtio mmio read at %#x", offset);
-    log_info("READ virtio mmio at offset=%#x[%s], size=%d, vdev=%p, type=%d",
-             offset, virtio_mmio_reg_name(offset), size, vdev, vdev->type);
+    log_debug("READ virtio mmio at base=%#lx, offset=%#x[%s], size=%d, vdev=%p, type=%s(%d), zone=%d, queue=%d, status=%#x, irq=%d, queue_size=%d",
+             vdev->base_addr, offset, virtio_mmio_reg_name(offset), size, vdev,
+             virtio_device_type_to_string(vdev->type), vdev->type, vdev->zone_id,
+             vdev->regs.queue_sel, vdev->regs.status, vdev->irq_id,
+             vdev->vqs[vdev->regs.queue_sel].num);
 
     if (!vdev) {
         switch (offset) {
@@ -665,7 +664,7 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
         offset -= VIRTIO_MMIO_CONFIG;
         // the first member of vdev->dev must be config.
         log_debug("read virtio dev config");
-        return *(uint64_t *)(vdev->dev + offset);
+        return *(uint64_t *)((uintptr_t)vdev->dev + offset);
     }
 
     if (size != 4) {
@@ -701,18 +700,13 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
         log_debug("read VIRTIO_MMIO_QUEUE_READY");
         return vdev->vqs[vdev->regs.queue_sel].ready;
     case VIRTIO_MMIO_INTERRUPT_STATUS:
-        log_info("debug: (%s) current interrupt status is %d", __func__,
-                 vdev->regs.interrupt_status);
+        log_debug("read VIRTIO_MMIO_INTERRUPT_STATUS");
 #ifdef LOONGARCH64
         // clear lvz gintc irq injection bit to avoid endless interrupt...
         log_warn(
             "clear lvz gintc irq injection bit to avoid endless interrupt...");
         ioctl(ko_fd, HVISOR_CLEAR_INJECT_IRQ);
 #endif
-        if (vdev->regs.interrupt_status == 0) {
-            log_error("virtio-mmio-read: interrupt status is 0, type is %d",
-                      vdev->type);
-        }
         return vdev->regs.interrupt_status;
     case VIRTIO_MMIO_STATUS:
         log_debug("read VIRTIO_MMIO_STATUS");
@@ -744,12 +738,12 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
 
 void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
                        unsigned size) {
-    log_debug("virtio mmio write at %#x, value is %#x", offset, value);
-
-    log_info("WRITE virtio mmio at offset=%#x[%s], value=%#x, size=%d, "
-             "vdev=%p, type=%d",
-             offset, virtio_mmio_reg_name(offset), value, size, vdev,
-             vdev->type);
+    log_debug("WRITE virtio mmio at base=%#lx, offset=%#x[%s], value=%#x, size=%u, "
+             "vdev=%p, type=%s(%u), zone=%u, queue=%u, status=%#x, irq=%u, queue_size=%u",
+             vdev->base_addr, offset, virtio_mmio_reg_name(offset), value, size, vdev,
+             virtio_device_type_to_string(vdev->type), vdev->type, vdev->zone_id,
+             vdev->regs.queue_sel, vdev->regs.status, vdev->irq_id,
+             vdev->vqs[vdev->regs.queue_sel].num);
 
     VirtMmioRegs *regs = &vdev->regs;
     VirtQueue *vqs = vdev->vqs;
@@ -851,8 +845,6 @@ void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
                       regs->interrupt_status, value, vdev->type);
         }
         regs->interrupt_status &= !value;
-        log_info("debug: (%s) clearing! interrupt_status -> %d", __func__,
-                 regs->interrupt_status);
         break;
     case VIRTIO_MMIO_STATUS:
         log_debug("write VIRTIO_MMIO_STATUS");
@@ -1053,7 +1045,7 @@ void handle_virtio_requests() {
     unsigned long long count = 0;
     for (;;) {
 #ifndef LOONGARCH64
-        log_warn("signal_count is %d, proc_count is %d", signal_count,
+        log_debug("signal_count is %d, proc_count is %d", signal_count,
                  proc_count);
         sigwait(&wait_set, &sig); // change to no signal irq
         signal_count++;
@@ -1121,7 +1113,7 @@ int virtio_init() {
     initialize_log();
 
     log_info("hvisor init");
-    ko_fd = open("/dev/hvisor", O_RDWR);
+    ko_fd = open(HVISOR_DEVICE, O_RDWR);
     if (ko_fd < 0) {
         log_error("open hvisor failed");
         exit(1);

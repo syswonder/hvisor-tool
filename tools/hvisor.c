@@ -89,9 +89,9 @@ void *read_file(char *filename, uint64_t *filesize) {
 }
 
 int open_dev() {
-    int fd = open("/dev/hvisor", O_RDWR);
+    int fd = open(HVISOR_DEVICE, O_RDWR);
     if (fd < 0) {
-        log_error("Failed to open /dev/hvisor!");
+        log_error("Failed to open %s!", HVISOR_DEVICE);
         exit(1);
     }
     return fd;
@@ -150,11 +150,11 @@ static __u64 load_str_to_memory(const char *str, __u64 load_paddr) {
     return map_size;
 }
 
-static __u64 load_image_to_memory(const char *path, __u64 load_paddr) {
+static uint64_t load_image_to_memory(const char *path, __u64 load_paddr) {
     if (strcmp(path, "null") == 0) {
         return 0;
     }
-    __u64 size, page_size,
+    uint64_t size, page_size,
         map_size; // Define variables: image size, page size, and map size
     int fd;       // File descriptor
     void *image_content,
@@ -173,7 +173,7 @@ static __u64 load_image_to_memory(const char *path, __u64 load_paddr) {
 
     // Map the physical memory to virtual memory
 #ifdef LOONGARCH64
-    virt_addr = (__u64)mmap(NULL, map_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+    virt_addr = (uint64_t)mmap(NULL, map_size, PROT_READ | PROT_WRITE | PROT_EXEC,
                             MAP_SHARED, fd, load_paddr);
 #else
     virt_addr = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
@@ -913,8 +913,8 @@ static int zone_shutdown(int argc, char *argv[]) {
     if (argc != 2 || strcmp(argv[0], "-id") != 0) {
         help(1);
     }
-    __u64 zone_id;
-    sscanf(argv[1], "%llu", &zone_id);
+    uint64_t zone_id;
+    sscanf(argv[1], "%lu", &zone_id);
     int fd = open_dev();
     int err = ioctl(fd, HVISOR_ZONE_SHUTDOWN, zone_id);
     if (err)
@@ -923,17 +923,17 @@ static int zone_shutdown(int argc, char *argv[]) {
     return err;
 }
 
-static void print_cpu_list(__u64 cpu_mask, char *outbuf, size_t bufsize) {
+static void print_cpu_list(uint64_t cpu_mask, char *outbuf, size_t bufsize) {
     int found_cpu = 0;
     char *buf = outbuf;
 
-    for (int i = 0; i < MAX_CPUS && buf - outbuf < bufsize; i++) {
+    for (size_t i = 0; i < MAX_CPUS && (size_t)(buf - outbuf) < bufsize; i++) {
         if ((cpu_mask & (1ULL << i)) != 0) {
             if (found_cpu) {
                 *buf++ = ',';
                 *buf++ = ' ';
             }
-            snprintf(buf, bufsize - (buf - outbuf), "%d", i);
+            snprintf(buf, bufsize - (buf - outbuf), "%zu", i);
             buf += strlen(buf);
             found_cpu = 1;
         }
@@ -948,7 +948,7 @@ static int zone_list(int argc, char *argv[]) {
     if (argc != 0) {
         help(1);
     }
-    __u64 cnt = CONFIG_MAX_ZONES;
+    uint64_t cnt = CONFIG_MAX_ZONES;
     zone_info_t *zones = malloc(sizeof(zone_info_t) * cnt);
     zone_list_args_t args = {cnt, zones};
     // printf("zone_list: cnt %llu, zones %p\n", cnt, zones);
