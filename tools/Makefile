@@ -55,6 +55,8 @@ ifeq ($(VIRTIO_GPU), y)
 	CFLAGS += -DENABLE_VIRTIO_GPU
 endif
 
+sources += $(wildcard ./virtio_scmi/*.c)
+
 include $(sources:.c=.d)
 
 ifeq ($(DEBUG), y)
@@ -107,4 +109,4 @@ rpmsg_demo: $(rpmsg_demo_object)
 	$(CC) -o $@ $^ $(CFLAGS) $(include_dirs) $(LDFLAGS) $(LIBS)
 
 clean:
-	@rm -f hvisor ivc_demo rpmsg_demo *.o *.d *.d.* virtio_gpu/*.o virtio_gpu/*.d virtio_gpu/*.d.* ../cJSON/*.o ../cJSON/*.d ../cJSON/*.d.*
+	@rm -f hvisor ivc_demo rpmsg_demo *.o *.d *.d.* virtio_gpu/*.o virtio_gpu/*.d virtio_gpu/*.d.* ../cJSON/*.o ../cJSON/*.d ../cJSON/*.d.* ./virtio_scmi/*.o ./virtio_scmi/*.d ./virtio_scmi/*.d.*
