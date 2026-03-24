@@ -36,9 +36,13 @@
 #include "virtio.h"
 #include "virtio_blk.h"
 #include "virtio_console.h"
-#include "virtio_gpu.h"
 #include "virtio_net.h"
+#ifdef ENABLE_VIRTIO_GPU
+#include "virtio_gpu.h"
+#endif
+#ifdef ENABLE_VIRTIO_SCMI
 #include "virtio_scmi.h"
+#endif
 
 /// hvisor kernel module fd
 int ko_fd;
@@ -211,10 +215,15 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
         break;
 
     case VirtioTSCMI:
+#ifdef ENABLE_VIRTIO_SCMI
         vdev->regs.dev_feature = SCMI_SUPPORTED_FEATURES;
         vdev->dev = init_scmi_dev();
         init_virtio_queue(vdev, dev_type);
         is_err = 0;
+#else
+        log_error("virtio scmi is not enabled");
+        goto err;
+#endif
         break;
     
     case VirtioTGPU:
@@ -323,6 +332,7 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
         break;
 
     case VirtioTSCMI:
+#ifdef ENABLE_VIRTIO_SCMI
         vdev->vqs_len = SCMI_MAX_QUEUES;
         vqs = malloc(sizeof(VirtQueue) * SCMI_MAX_QUEUES);
         for (int i = 0; i < SCMI_MAX_QUEUES; ++i) {
@@ -332,6 +342,9 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
         }
         vqs[SCMI_QUEUE_TX].notify_handler = virtio_scmi_txq_notify_handler;
         vdev->vqs = vqs;
+#else
+        log_error("virtio scmi is not enabled");
+#endif
         break;
 
     default:
