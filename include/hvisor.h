@@ -97,9 +97,11 @@ typedef struct ioctl_zone_list_args zone_list_args_t;
 #define HVISOR_SCMI_CLOCK_CONFIG_GET 0x06
 #define HVISOR_SCMI_CLOCK_CONFIG_SET 0x07
 #define HVISOR_SCMI_CLOCK_NAME_GET 0x08
+#define HVISOR_SCMI_CLOCK_SET_PHANDLE 0xff
 
 /* SCMI Reset Subcommands */
 #define HVISOR_SCMI_RESET_RESET 0x01
+#define HVISOR_SCMI_RESET_SET_PHANDLE 0xff
 
 /* SCMI Clock ioctl argument structure */
 struct hvisor_scmi_clock_args {
@@ -140,6 +142,9 @@ struct hvisor_scmi_clock_args {
             __u32 clock_id;
             char name[64];
         } clock_name_info; /* For NAME_GET */
+        struct {
+            __u32 phandle;
+        } clock_phandle_info; /* For SET_PHANDLE */
         __u8 data[0];      /* For other commands */
     } u;
 };
@@ -154,6 +159,9 @@ struct hvisor_scmi_reset_args {
             __u32 flags;
             __u32 reset_state;
         } reset_info; /* For RESET */
+        struct {
+            __u32 phandle;
+        } reset_phandle_info; /* For SET_PHANDLE */
         __u8 data[0];      /* For other commands */
     } u;
 };
