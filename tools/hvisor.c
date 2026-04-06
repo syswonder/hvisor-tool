@@ -126,7 +126,7 @@ static __u64 load_buffer_to_memory(const void *buf, __u64 size,
     return map_size;
 }
 
-static __u64 load_str_to_memory(const char *str, __u64 load_paddr) {
+static __attribute__((unused)) __u64 load_str_to_memory(const char *str, __u64 load_paddr) {
     /* Include trailing '\0' so guest side can safely parse cmdline. */
     __u64 size = strlen(str) + 1;
     return load_buffer_to_memory(str, size, load_paddr);
@@ -238,11 +238,11 @@ static int parse_modules(const cJSON *const modules_json) {
         goto err_out;                                                          \
     }
 
-static int parse_arch_config(cJSON *root, zone_config_t *config) {
+static __attribute__((unused)) int parse_arch_config(cJSON *root, zone_config_t *config) {
     cJSON *arch_config_json = SAFE_CJSON_GET_OBJECT_ITEM(root, "arch_config");
     CHECK_JSON_NULL(arch_config_json, "arch_config");
 
-    arch_zone_config_t *arch_config = &config->arch_config;
+    arch_zone_config_t *arch_config __attribute__((unused)) = &config->arch_config;
 #ifdef ARM64
     cJSON *gic_version_json =
         SAFE_CJSON_GET_OBJECT_ITEM(arch_config_json, "gic_version");
@@ -945,7 +945,7 @@ static void print_cpu_list(__u64 cpu_mask, char *outbuf, size_t bufsize) {
     int found_cpu = 0;
     char *buf = outbuf;
 
-    for (int i = 0; i < MAX_CPUS && buf - outbuf < bufsize; i++) {
+    for (int i = 0; i < MAX_CPUS && (size_t)(buf - outbuf) < bufsize; i++) {
         if ((cpu_mask & (1ULL << i)) != 0) {
             if (found_cpu) {
                 *buf++ = ',';
@@ -962,7 +962,7 @@ static void print_cpu_list(__u64 cpu_mask, char *outbuf, size_t bufsize) {
 }
 
 // ./hvisor zone list
-static int zone_list(int argc, char *argv[]) {
+static int zone_list(int argc, char *argv[] __attribute__((unused))) {
     if (argc != 0) {
         help(1);
     }

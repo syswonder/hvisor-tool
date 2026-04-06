@@ -96,6 +96,10 @@ struct hvisor_load_image_args {
 
 #define HVISOR_CLEAR_INJECT_IRQ _IO(1, 6) // used for ioctl
 #define HVISOR_HC_CLEAR_INJECT_IRQ 20     // hvcall code in hvisor
+#define HVISOR_HC_GET_VIRTIO_IRQ 86       // same code as x86_64, used when booting via ACPI (no DTB)
+// hvisor injects SWI1 (ESTAT bit 1) to notify root zone virtio daemon.
+// SWI0/SWI1 (hwirq 0/1) are software-only lines on CPUINTC, not owned by
+// the kernel, so request_percpu_irq() on them will not conflict.
 
 #endif /* LOONGARCH64 */
 #ifdef LOONGARCH64
@@ -103,9 +107,12 @@ static inline __u64 hvisor_call(__u64 code, __u64 arg0, __u64 arg1) {
     register __u64 a0 asm("a0") = code;
     register __u64 a1 asm("a1") = arg0;
     register __u64 a2 asm("a2") = arg1;
-    // asm volatile ("hvcl"); // not supported by loongarch gcc now
+    asm volatile ("hvcl 0" : "+r"(a0) : "r"(a1), "r"(a2) : "memory"); // it is supported by loongarch64-linux-gnu-gcc (13.2.0)
+    // boneinscri -- 2026.04
+    // download: wget https://github.com/LoongsonLab/oscomp-toolchains-for-oskernel/releases/download/gcc-13.2.0-loongarch64/gcc-13.2.0-loongarch64-linux-gnu.tgz
+
     // hvcl 0 is 0x002b8000
-    __asm__(".word 0x002b8000" : "+r"(a0), "+r"(a1), "+r"(a2));
+    // __asm__(".word 0x002b8000" : "+r"(a0), "+r"(a1), "+r"(a2));
     return a0;
 }
 #endif /* LOONGARCH64 */

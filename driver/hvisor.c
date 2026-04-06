@@ -15,12 +15,19 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/kthread.h>
+#include <linux/hrtimer.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/of_reserved_mem.h>
+#ifdef LOONGARCH64
+#include <linux/irq.h>
+#include <linux/irqdesc.h>
+#include <linux/irqdomain.h>
+#endif
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -35,11 +42,66 @@ struct virtio_bridge *virtio_bridge;
 int virtio_irq = -1;
 static struct task_struct *task = NULL;
 struct eventfd_ctx *virtio_irq_ctx = NULL;
+#ifdef LOONGARCH64
+/* per-CPU cookie required by request_percpu_irq for the IPI line */
+static DEFINE_PER_CPU(int, hvisor_percpu_dev);
+static bool hvisor_irq_is_percpu = false;
+
+/* kthread for polling virtio_bridge->need_wakeup when no usable IRQ exists.
+ * Hypervisor sets need_wakeup != 0 to notify root zone; we clear it and
+ * signal the userspace virtio daemon via eventfd.
+ * Uses a waitqueue so the thread sleeps properly instead of busy-looping. */
+static struct task_struct *hvisor_poll_thread = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(hvisor_poll_wq);
+static atomic_t hvisor_poll_pending = ATOMIC_INIT(0);
+
+/* hrtimer fires every 1ms to wake the poll thread */
+static struct hrtimer hvisor_poll_timer;
+
+static enum hrtimer_restart hvisor_poll_timer_fn(struct hrtimer *timer)
+{
+    atomic_set(&hvisor_poll_pending, 1);
+    wake_up(&hvisor_poll_wq);
+    hrtimer_forward_now(timer, ms_to_ktime(1));
+    return HRTIMER_RESTART;
+}
+
+static int hvisor_poll_fn(void *unused)
+{
+    while (!kthread_should_stop()) {
+        /* Sleep until someone calls wake_up(&hvisor_poll_wq) or the thread
+         * is asked to stop. */
+        wait_event_interruptible(hvisor_poll_wq,
+            atomic_read(&hvisor_poll_pending) || kthread_should_stop());
+
+        if (kthread_should_stop())
+            break;
+
+        atomic_set(&hvisor_poll_pending, 0);
+
+        if (virtio_bridge && READ_ONCE(virtio_bridge->need_wakeup)) {
+            WRITE_ONCE(virtio_bridge->need_wakeup, 0);
+            if (virtio_irq_ctx) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+                eventfd_signal(virtio_irq_ctx);
+#else
+                eventfd_signal(virtio_irq_ctx, 1);
+#endif
+            }
+        }
+    }
+    return 0;
+}
+#endif
 
 // initial virtio el2 shared region
 static int hvisor_init_virtio(void) {
     int err;
-    if (virtio_irq == -1) {
+    if (virtio_irq == -1
+#ifdef LOONGARCH64
+        && !hvisor_poll_thread
+#endif
+    ) {
         pr_err("virtio device is not available\n");
         return ENOTTY;
     }
@@ -52,6 +114,14 @@ static int hvisor_init_virtio(void) {
     err = hvisor_call(HVISOR_HC_INIT_VIRTIO, __pa(virtio_bridge), 0);
     if (err)
         return err;
+#ifdef LOONGARCH64
+    /* Start the polling thread after virtio_bridge is ready */
+    if (hvisor_poll_thread) {
+        wake_up_process(hvisor_poll_thread);
+        /* Start the 1ms hrtimer that periodically wakes the poll thread */
+        hrtimer_start(&hvisor_poll_timer, ms_to_ktime(1), HRTIMER_MODE_REL);
+    }
+#endif
     return 0;
 }
 
@@ -385,6 +455,83 @@ static int __init hvisor_init(void) {
     // The irq number must be retrieved from dtb node, because it is different
     // from GIC's IRQ number.
     node = of_find_node_by_path("/hvisor_virtio_device");
+#ifdef LOONGARCH64
+    if (!node) {
+        // LoongArch64 booting via ACPI (no DTB).
+        // Strategy: try to map SWI0 (hwirq 0) on the CPUINTC domain and
+        // register a per-CPU IRQ handler. Hypervisor triggers SWI0 by
+        // writing ESTAT.SIP0 (bit 0) in the guest CSR.
+        //
+        // The CPUINTC domain is created with irq_domain_alloc_named_fwnode(
+        // "CPUINTC") so we find it via irq_find_matching_fwnode().
+        // loongarch_cpu_intc_map() has no hwirq range restriction, so
+        // hwirq 0 (SWI0) and hwirq 1 (SWI1) are fully supported.
+        // init_IRQ() already enables ECFGF_SIP0 in CSR.ECFG, so the
+        // interrupt line is live as soon as we register a handler.
+        struct fwnode_handle *fwnode;
+        struct irq_domain *cpuintc_domain = NULL;
+
+        fwnode = irq_domain_alloc_named_fwnode("CPUINTC");
+        if (fwnode) {
+            cpuintc_domain = irq_find_matching_fwnode(fwnode,
+                                                      DOMAIN_BUS_ANY);
+            irq_domain_free_fwnode(fwnode);
+        }
+
+        if (!cpuintc_domain) {
+            // Fallback: scan existing mappings to find the CPUINTC domain
+            int i;
+            for (i = 1; i < NR_IRQS; i++) {
+                struct irq_data *d = irq_get_irq_data(i);
+                if (!d || !d->domain || !d->domain->fwnode)
+                    continue;
+                if (strstr(fwnode_get_name(d->domain->fwnode), "CPUINTC")) {
+                    cpuintc_domain = d->domain;
+                    break;
+                }
+            }
+        }
+
+        if (cpuintc_domain) {
+            virtio_irq = irq_create_mapping(cpuintc_domain, 0);
+            pr_info("hvisor: SWI0 mapped to Linux IRQ %d\n", virtio_irq);
+            if (virtio_irq > 0) {
+                irq_set_handler(virtio_irq, handle_simple_irq);
+                err = request_irq(virtio_irq, virtio_irq_handler,
+                                  0, "hvisor_virtio_device",
+                                  &hvisor_misc_dev);
+                if (!err) {
+                    pr_info("hvisor: ACPI boot, using SWI0 Linux IRQ %d\n",
+                            virtio_irq);
+                    goto init_done;
+                }
+                pr_warn("hvisor: request_irq for SWI0 failed (%d), "
+                        "falling back to kthread poll\n", err);
+                virtio_irq = -1;
+            }
+        }
+        goto init_done;
+        // Fallback: kthread + hrtimer polling when IRQ registration fails
+//         pr_warn("hvisor: cannot register SWI0 IRQ, using kthread poll\n");
+//         hvisor_poll_thread = kthread_create(hvisor_poll_fn, NULL,
+//                                             "hvisor_poll");
+//         if (IS_ERR(hvisor_poll_thread)) {
+//             pr_err("hvisor: failed to create poll thread: %ld\n",
+//                    PTR_ERR(hvisor_poll_thread));
+//             hvisor_poll_thread = NULL;
+//             misc_deregister(&hvisor_misc_dev);
+//             return -ENOMEM;
+//         }
+// #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+//         hrtimer_setup(&hvisor_poll_timer, hvisor_poll_timer_fn,
+//                       CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+// #else
+//         hrtimer_init(&hvisor_poll_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+//         hvisor_poll_timer.function = hvisor_poll_timer_fn;
+// #endif
+//         goto init_done;
+    } else
+#endif /* LOONGARCH64 */
     if (!node) {
         pr_err("Critical: Missing device tree node!\n");
         pr_err("   Please add the following to your device tree:\n");
@@ -392,17 +539,33 @@ static int __init hvisor_init(void) {
         pr_err("       compatible = \"hvisor\";\n");
         pr_err("       interrupts = <0x00 0x20 0x01>;\n");
         pr_err("   };\n");
+        misc_deregister(&hvisor_misc_dev);
         return -ENODEV;
+    } else {
+        virtio_irq = of_irq_get(node, 0);
+        of_node_put(node);
     }
 
-    virtio_irq = of_irq_get(node, 0);
-    err = request_irq(virtio_irq, virtio_irq_handler,
-                      IRQF_SHARED | IRQF_TRIGGER_RISING, "hvisor_virtio_device",
-                      &hvisor_misc_dev);
-    if (err)
-        goto err_out;
-
-    of_node_put(node);
+#ifdef LOONGARCH64
+    if (hvisor_irq_is_percpu) {
+        err = request_percpu_irq(virtio_irq, virtio_irq_handler,
+                                 "hvisor_virtio_device", &hvisor_percpu_dev);
+        if (err)
+            goto err_out;
+        enable_percpu_irq(virtio_irq, IRQ_TYPE_NONE);
+    } else
+#endif
+    {
+        err = request_irq(virtio_irq, virtio_irq_handler,
+#ifdef LOONGARCH64
+                          IRQF_SHARED, "hvisor_virtio_device",
+#else
+                          IRQF_SHARED | IRQF_TRIGGER_RISING, "hvisor_virtio_device",
+#endif
+                          &hvisor_misc_dev);
+        if (err)
+            goto err_out;
+    }
 #else
     // we don't use device tree in x86_64, so we have to get IRQ using hypercall
     u32 *irq = kmalloc(sizeof(u32), GFP_KERNEL);
@@ -415,6 +578,9 @@ static int __init hvisor_init(void) {
 
     kfree(irq);
 #endif /* X86_64 */
+#ifdef LOONGARCH64
+init_done:
+#endif
     pr_info("hvisor init done!!!\n");
     return 0;
 err_out:
@@ -429,6 +595,13 @@ err_out:
 ** Module Exit function
 */
 static void __exit hvisor_exit(void) {
+#ifdef LOONGARCH64
+    if (hvisor_poll_thread) {
+        hrtimer_cancel(&hvisor_poll_timer);
+        kthread_stop(hvisor_poll_thread);
+        hvisor_poll_thread = NULL;
+    }
+#endif
     if (virtio_irq != -1)
         free_irq(virtio_irq, &hvisor_misc_dev);
     if (virtio_irq_ctx)
