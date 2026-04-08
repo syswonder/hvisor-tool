@@ -96,10 +96,18 @@ struct hvisor_load_image_args {
 
 #define HVISOR_CLEAR_INJECT_IRQ _IO(1, 6) // used for ioctl
 #define HVISOR_HC_CLEAR_INJECT_IRQ 20     // hvcall code in hvisor
-#define HVISOR_HC_GET_VIRTIO_IRQ 86       // same code as x86_64, used when booting via ACPI (no DTB)
-// hvisor injects SWI1 (ESTAT bit 1) to notify root zone virtio daemon.
-// SWI0/SWI1 (hwirq 0/1) are software-only lines on CPUINTC, not owned by
-// the kernel, so request_percpu_irq() on them will not conflict.
+
+#define HVISOR_ZONE_M_ALLOC _IOW(1, 7, kmalloc_info_t *)
+#define HVISOR_ZONE_M_FREE _IOW(1, 8, kmalloc_info_t *)
+
+// for HVISOR_ZONE_M_ALLOC and HVISOR_ZONE_M_FREE
+// boneinscri -- 2026.04
+struct kmalloc_info {
+    __u64 pa;  // Physical address for HVISOR_ZONE_M_ALLOC/FREE
+    __u64 size;
+};
+typedef struct kmalloc_info kmalloc_info_t;
+
 
 #endif /* LOONGARCH64 */
 #ifdef LOONGARCH64

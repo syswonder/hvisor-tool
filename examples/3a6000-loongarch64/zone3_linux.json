@@ -1,0 +1,64 @@
+{
+    "arch": "loongarch64",
+    "name": "linux1",
+    "zone_id": 1,
+    "boot_method": "normal",
+    "cpus": [
+      100
+    ],
+    "memory_regions": [
+        {
+            "type": "io",
+            "physical_start": "0x1fe00000",
+            "virtual_start": "0x1fe00000",
+            "size": "0x1000"
+        },
+        {
+            "type": "io",
+            "physical_start": "0x10000000",
+            "virtual_start":  "0x10000000",
+            "size": "0x2000"
+        },
+        {
+            "type": "io",
+            "physical_start": "0x10010000",
+            "virtual_start":  "0x10010000",
+            "size": "0x20000"
+        },
+        {
+            "type": "io",
+            "physical_start": "0x100d0000",
+            "virtual_start":  "0x100d0000",
+            "size": "0x1000"
+        },
+        {
+            "type": "io",
+            "physical_start": "0xfe00000000",
+            "virtual_start":  "0xfe00000000",
+            "size": "0x20000000"
+        },
+        {
+            "type": "io",
+            "physical_start": "0x18408000",
+            "virtual_start":  "0x18408000",
+            "size": "0x8000"
+        }
+    ],
+    "interrupts": [
+      100
+    ],
+    "ivc_configs": [],
+    "kernel_args": "BOOT_IMAGE=loglevel=7 verbose earlycon=uart,mmio,0x1fe001e0,115200n8 console=ttyS0,115200",
+    "kernel_filepath": "./Guest/vmlinux-dtb.bin",
+    "dtb_filepath": "./test.bin",
+    "kernel_load_paddr": "0x00200000",
+    "dtb_load_paddr": "0xc0000000",
+    "entry_point": "0x9000000000faf000",
+    "arch_config": {
+        "dummy": "0x1234"
+    },
+    "pci_config": {
+    },
+    "num_pci_devs": 0,
+    "alloc_pci_devs": []
+}

@@ -38,6 +38,15 @@
 #include "hvisor.h"
 #include "zone_config.h"
 
+/* MAX_ORDER was renamed to MAX_PAGE_ORDER in kernel 6.3,
+ * and its semantics changed in 6.1: before 6.1 MAX_ORDER was the number
+ * of orders (max valid order = MAX_ORDER-1), from 6.1 onwards it is the
+ * max valid order itself. */
+#ifndef MAX_PAGE_ORDER
+/* old kernel: MAX_ORDER is count, subtract 1 to get max valid order */
+#define MAX_PAGE_ORDER (MAX_ORDER - 1)
+#endif
+
 struct virtio_bridge *virtio_bridge;
 int virtio_irq = -1;
 static struct task_struct *task = NULL;
@@ -97,14 +106,16 @@ static int hvisor_poll_fn(void *unused)
 // initial virtio el2 shared region
 static int hvisor_init_virtio(void) {
     int err;
-    if (virtio_irq == -1
-#ifdef LOONGARCH64
-        && !hvisor_poll_thread
-#endif
-    ) {
+    
+    #ifdef LOONGARCH64
+    // do nothing
+    #elif
+    if (virtio_irq == -1) {
         pr_err("virtio device is not available\n");
         return ENOTTY;
     }
+    #endif
+
     virtio_bridge = (struct virtio_bridge *)__get_free_pages(GFP_KERNEL, 0);
     if (virtio_bridge == NULL)
         return -ENOMEM;
@@ -300,15 +311,144 @@ static int hvisor_zone_list(zone_list_args_t __user *arg) {
         pr_err("hvisor.ko: failed to get zone list\n");
         goto out;
     }
+
     // copy result back to user space
     if (copy_to_user(args.zones, zones, ret * sizeof(zone_info_t))) {
         pr_err("hvisor.ko: failed to copy to user\n");
         goto out;
     }
+
 out:
     kfree(zones);
     return ret;
 }
+
+
+#ifdef LOONGARCH64
+/* Track all pages allocated via hvisor_m_alloc so they can be freed
+ * automatically when the daemon exits (file release). */
+struct hvisor_alloc_entry {
+    unsigned long vaddr;
+    unsigned int  order;
+    struct file  *owner;   /* the fd that allocated this block */
+    struct list_head list;
+};
+static LIST_HEAD(hvisor_alloc_list);
+static DEFINE_SPINLOCK(hvisor_alloc_lock);
+
+// order <= MAX_ORDER-1, size <= (PAGE_SIZE << (MAX_ORDER-1))
+// actual max depends on kernel buddy system configuration (MAX_ORDER)
+static unsigned long hvisor_m_alloc(struct file *file, kmalloc_info_t __user *arg) {
+    kmalloc_info_t kmalloc_info;
+
+    if (copy_from_user(&kmalloc_info, arg, sizeof(kmalloc_info))) {
+        pr_err("hvisor: failed to copy from user\n");
+        return -EFAULT;
+    }
+
+    if (kmalloc_info.size == 0) {
+        pr_err("hvisor: invalid allocation size 0\n");
+        return -EINVAL;
+    }
+
+    __u64 reduced_size = kmalloc_info.size;
+
+    void *area;
+    /* Use ilog2 (floor to power-of-2) instead of get_order (ceil),
+     * then convert size -> order by subtracting PAGE_SHIFT.
+     * This avoids over-allocating when size is not a power-of-2.
+     * e.g. 0x2f000000 (752MB): get_order gives order for 1GB (wasteful),
+     *      ilog2 gives order for 512MB (exact largest fitting block). */
+    unsigned int order = min_t(unsigned int,
+        ilog2(reduced_size) > PAGE_SHIFT ? ilog2(reduced_size) - PAGE_SHIFT : 0,
+        MAX_PAGE_ORDER);
+
+    // try allocate from big area to small area
+    area = (void *)__get_free_pages(GFP_KERNEL, order);
+    while (area == NULL) {
+        if (order == 0) {
+            pr_err("hvisor: failed to allocate memory, size %llx\n", kmalloc_info.size);
+            return -ENOMEM;
+        }
+        order--;
+        area = (void *)__get_free_pages(GFP_KERNEL, order);
+    }
+
+    reduced_size = PAGE_SIZE << order;
+
+    SetPageReserved(virt_to_page(area));
+    memset(area, 0, reduced_size);
+
+    /* Record this allocation for automatic cleanup on release */
+    struct hvisor_alloc_entry *entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+    if (entry) {
+        entry->vaddr = (unsigned long)area;
+        entry->order = order;
+        entry->owner = file;
+        spin_lock(&hvisor_alloc_lock);
+        list_add(&entry->list, &hvisor_alloc_list);
+        spin_unlock(&hvisor_alloc_lock);
+    }
+
+    if (reduced_size < kmalloc_info.size) {
+        kmalloc_info.size -= reduced_size;
+    } else {
+        kmalloc_info.size = 0;
+    }
+
+    kmalloc_info.pa = __pa(area);
+
+    // copy result back to user space
+    if (copy_to_user(arg, &kmalloc_info, sizeof(kmalloc_info))) {
+        pr_err("hvisor: failed to copy to user\n");
+        ClearPageReserved(virt_to_page(area));
+        free_pages((unsigned long)area, order);
+        return -EFAULT;
+    }
+
+    // pr_info("allocate memory: reduced_size %llx, order %u, area %px, size %llx, pa : %llx\n",
+    //     reduced_size, order, area, kmalloc_info.size, __pa(area));
+
+    return 0;
+}
+static int hvisor_m_free(kmalloc_info_t __user *arg) {
+    // TODO: check this for Memory Region of Non root Zone!
+    kmalloc_info_t kmalloc_info;
+
+    if (copy_from_user(&kmalloc_info, arg, sizeof(kmalloc_info))) {
+        pr_err("hvisor: failed to copy from user\n");
+        return -EFAULT;
+    }
+
+    void *area = (void *)__va(kmalloc_info.pa);
+    unsigned int order = get_order(kmalloc_info.size);
+
+    /* Remove from tracking list */
+    struct hvisor_alloc_entry *entry, *tmp;
+    spin_lock(&hvisor_alloc_lock);
+    list_for_each_entry_safe(entry, tmp, &hvisor_alloc_list, list) {
+        if (entry->vaddr == (unsigned long)area) {
+            order = entry->order;
+            list_del(&entry->list);
+            kfree(entry);
+            break;
+        }
+    }
+    spin_unlock(&hvisor_alloc_lock);
+
+    // Clear the PageReserved bit
+    ClearPageReserved(virt_to_page(area));
+
+    // Free the allocated pages
+    free_pages((unsigned long)area, order);
+
+    // pr_info("freed memory: area %px, size %llx, pa : %llx\n",
+    //     area, kmalloc_info.size, kmalloc_info.pa);
+    return 0;
+}
+#endif
+
+
 
 static long hvisor_ioctl(struct file *file, unsigned int ioctl,
                          unsigned long arg) {
@@ -351,6 +491,14 @@ static long hvisor_ioctl(struct file *file, unsigned int ioctl,
     case HVISOR_CLEAR_INJECT_IRQ:
         err = hvisor_call(HVISOR_HC_CLEAR_INJECT_IRQ, 0, 0);
         break;
+    // for dynamic memory allocation from Heap of Root Linux
+    // --boneinscri 2026.04
+    case HVISOR_ZONE_M_ALLOC:
+        err = hvisor_m_alloc(file, (kmalloc_info_t __user *)arg);
+        break;
+    case HVISOR_ZONE_M_FREE:
+        err = hvisor_m_free((kmalloc_info_t __user *)arg);
+        break;
 #endif
     default:
         err = -EINVAL;
@@ -391,11 +539,42 @@ static int hvisor_map(struct file *filp, struct vm_area_struct *vma) {
     return 0;
 }
 
+#ifdef LOONGARCH64
+/* Called when the last file descriptor to /dev/hvisor is closed (daemon exit).
+ * Frees all pages that were allocated via hvisor_m_alloc but never freed. */
+static int hvisor_release(struct inode *inode, struct file *file)
+{
+    struct hvisor_alloc_entry *entry, *tmp;
+    LIST_HEAD(to_free);
+
+    spin_lock(&hvisor_alloc_lock);
+    list_for_each_entry_safe(entry, tmp, &hvisor_alloc_list, list) {
+        if (entry->owner == file) {
+            list_move(&entry->list, &to_free);
+        }
+    }
+    spin_unlock(&hvisor_alloc_lock);
+
+    list_for_each_entry_safe(entry, tmp, &to_free, list) {
+        pr_info("hvisor: release cleanup: freeing vaddr %lx order %u\n",
+                entry->vaddr, entry->order);
+        ClearPageReserved(virt_to_page((void *)entry->vaddr));
+        free_pages(entry->vaddr, entry->order);
+        list_del(&entry->list);
+        kfree(entry);
+    }
+    return 0;
+}
+#endif
+
 static const struct file_operations hvisor_fops = {
     .owner = THIS_MODULE,
     .unlocked_ioctl = hvisor_ioctl,
     .compat_ioctl = hvisor_ioctl,
     .mmap = hvisor_map,
+#ifdef LOONGARCH64
+    .release = hvisor_release,
+#endif
 };
 
 static struct miscdevice hvisor_misc_dev = {
@@ -510,6 +689,7 @@ static int __init hvisor_init(void) {
                 virtio_irq = -1;
             }
         }
+        of_node_put(node);
         goto init_done;
         // Fallback: kthread + hrtimer polling when IRQ registration fails
 //         pr_warn("hvisor: cannot register SWI0 IRQ, using kthread poll\n");

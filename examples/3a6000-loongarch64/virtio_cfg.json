@@ -1,0 +1,101 @@
+{
+    "zones": [
+        {
+            "id": 1,
+            "name": "linux",
+            "memory_region": [
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x00000000",
+                    "size": "0x10000000"
+                },
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x90000000",
+                    "size": "0x10000000"
+                }
+            ],
+            "devices": [
+                {
+                    "type": "console",
+                    "addr": "0x30001000",
+                    "len": "0x200",
+                    "irq": 4,
+                    "status": "enable"
+                }
+            ]
+        },
+        {
+            "id": 2,
+            "name": "sel4",
+            "memory_region": [
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x00000000",
+                    "size": "0x10000000"
+                },
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x90000000",
+                    "size": "0x10000000"
+                }
+            ]
+        },
+        {
+            "id": 3,
+            "name": "linux",
+            "memory_region": [
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x00000000",
+                    "size": "0x10000000"
+                },
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x90000000",
+                    "size": "0x10000000"
+                }
+            ],
+            "devices": [
+                {
+                    "type": "console",
+                    "addr": "0x30001000",
+                    "len": "0x200",
+                    "irq": 4,
+                    "status": "enable"
+                }
+            ]
+        },
+        {
+            "id": 4,
+            "name": "rt-thread",
+            "memory_region": [
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x200000",
+                    "size": "0x5000000"
+                }
+            ], 
+            "devices": [
+                {
+                    "type": "console",
+                    "addr": "0x30001000",
+                    "len": "0x1000",
+                    "irq": 16,
+                    "status": "enable"
+                }
+            ]
+        },
+        {
+            "id": 5,
+            "name" : "npucore",
+            "memory_region": [
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x80000000",
+                    "size": "0x2f000000"
+                }
+            ]
+        }
+   ]
+}

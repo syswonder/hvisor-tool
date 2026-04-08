@@ -1,0 +1,20 @@
+{
+    "zones": [
+        {
+            "id": 1,
+            "name": "linux",
+            "memory_region": [
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x200000",
+                    "size": "0xec00000"
+                },
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x100000000",
+                    "size": "0x20000000"
+                }
+            ]
+        }
+    ]
+}
