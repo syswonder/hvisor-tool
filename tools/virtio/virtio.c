@@ -1026,7 +1026,7 @@ void virtio_close() {
                        zone_mem[i][j][MEM_SIZE]);
             }
     }
-    multithread_log_exit();
+
     log_warn("virtio daemon exit successfully");
 }
 
