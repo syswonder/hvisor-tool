@@ -10,6 +10,7 @@ objects ?= $(sources:.c=.o)
 ivc_demo_object ?= ivc_demo.o
 rpmsg_demo_object ?= rpmsg_demo.o
 hvisor_objects ?= $(filter-out $(ivc_demo_object) $(rpmsg_demo_object), $(objects))
+BUILD_DEMOS ?= n
 ROOT ?=
 # gnu or musl
 LIBC ?= gnu
@@ -60,7 +61,9 @@ else
 	CFLAGS += -O2
 endif
 
+ifeq ($(origin CC), default)
 CC := $(CROSS_COMPILE)gcc
+endif
 
 ifeq ($(ARCH), arm64)
 	ifeq ($(VIRTIO_GPU), y)
@@ -76,9 +79,14 @@ else ifeq ($(ARCH), loongarch)
 	endif
 endif
 
+
+ifeq ($(BUILD_DEMOS),y)
+demo_targets := ivc_demo rpmsg_demo
+endif
+
 .PHONY: all clean
 
-all: hvisor ivc_demo rpmsg_demo
+all: hvisor $(demo_targets)
 
 %.d: %.c
 	@set -e; rm -f $@; \
