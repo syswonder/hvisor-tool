@@ -231,6 +231,6 @@ void *read_file(const char *filename, uint64_t *filesize);
 
 // boneinscri 2026.04
 char *open_json_file(const char *json_config_path);
-#define MIN(a,b) ((a)<(b) ? (a):(b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #endif /* __HVISOR_VIRTIO_H */

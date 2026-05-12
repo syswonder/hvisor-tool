@@ -103,11 +103,10 @@ struct hvisor_load_image_args {
 // for HVISOR_ZONE_M_ALLOC and HVISOR_ZONE_M_FREE
 // boneinscri -- 2026.04
 struct kmalloc_info {
-    __u64 pa;  // Physical address for HVISOR_ZONE_M_ALLOC/FREE
+    __u64 pa; // Physical address for HVISOR_ZONE_M_ALLOC/FREE
     __u64 size;
 };
 typedef struct kmalloc_info kmalloc_info_t;
-
 
 #endif /* LOONGARCH64 */
 #ifdef LOONGARCH64
@@ -115,9 +114,14 @@ static inline __u64 hvisor_call(__u64 code, __u64 arg0, __u64 arg1) {
     register __u64 a0 asm("a0") = code;
     register __u64 a1 asm("a1") = arg0;
     register __u64 a2 asm("a2") = arg1;
-    asm volatile ("hvcl 0" : "+r"(a0) : "r"(a1), "r"(a2) : "memory"); // it is supported by loongarch64-linux-gnu-gcc (13.2.0)
+    asm volatile(
+        "hvcl 0"
+        : "+r"(a0)
+        : "r"(a1), "r"(a2)
+        : "memory"); // it is supported by loongarch64-linux-gnu-gcc (13.2.0)
     // boneinscri -- 2026.04
-    // download: wget https://github.com/LoongsonLab/oscomp-toolchains-for-oskernel/releases/download/gcc-13.2.0-loongarch64/gcc-13.2.0-loongarch64-linux-gnu.tgz
+    // download: wget
+    // https://github.com/LoongsonLab/oscomp-toolchains-for-oskernel/releases/download/gcc-13.2.0-loongarch64/gcc-13.2.0-loongarch64-linux-gnu.tgz
 
     // hvcl 0 is 0x002b8000
     // __asm__(".word 0x002b8000" : "+r"(a0), "+r"(a1), "+r"(a2));

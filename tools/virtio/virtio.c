@@ -1002,18 +1002,19 @@ void virtio_close() {
     for (int i = 0; i < vdevs_num; i++)
         vdevs[i]->virtio_close(vdevs[i]);
 
-    // Free all pages allocated via HVISOR_ZONE_M_ALLOC before closing ko_fd
+        // Free all pages allocated via HVISOR_ZONE_M_ALLOC before closing ko_fd
 #ifdef LOONGARCH64
     for (int i = 0; i < MAX_ZONES; i++) {
         for (int j = 0; j < MAX_RAMS; j++) {
             if (zone_mem[i][j][MEM_SIZE] != 0) {
                 kmalloc_info_t info = {
-                    .pa   = zone_mem[i][j][ZONE0_IPA],
+                    .pa = zone_mem[i][j][ZONE0_IPA],
                     .size = zone_mem[i][j][MEM_SIZE],
                 };
                 if (ioctl(ko_fd, HVISOR_ZONE_M_FREE, &info) != 0)
-                    log_warn("HVISOR_ZONE_M_FREE failed for pa=0x%llx size=0x%llx",
-                             info.pa, info.size);
+                    log_warn(
+                        "HVISOR_ZONE_M_FREE failed for pa=0x%llx size=0x%llx",
+                        info.pa, info.size);
             }
         }
     }
@@ -1292,9 +1293,7 @@ int virtio_init() {
         exit(1);
     }
 
-
     printf("[trace], virtio init point1 !!!!!!!!!\n");
-
 
     // create eventfd
     efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -1508,8 +1507,6 @@ int virtio_start_from_json(char *json_path) {
                 "debug: zone0_ipa is %lx, zonex_ipa is %lx, mem_size is %lx",
                 zone0_ipa, zonex_ipa, mem_size);
 
-
-                
             // Map from zone0_ipa
             virt_addr = mmap(NULL, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED,
                              ko_fd, (off_t)zone0_ipa);
@@ -1557,7 +1554,7 @@ int virtio_start_from_json_dynamic(char *json_path) {
     unsigned long long mem_size;
     buffer = read_file(json_path, &file_size);
     buffer[file_size] = '\0';
-    
+
     // Read zones
     cJSON *root = cJSON_Parse(buffer);
     cJSON *zones_json = cJSON_GetObjectItem(root, "zones");
@@ -1589,7 +1586,8 @@ int virtio_start_from_json_dynamic(char *json_path) {
             fprintf(stderr, "Failed to create root JSON object\n");
             return EXIT_FAILURE;
         }
-        cJSON *memory_regions = cJSON_AddArrayToObject(zone_ram_root, "memory_regions");
+        cJSON *memory_regions =
+            cJSON_AddArrayToObject(zone_ram_root, "memory_regions");
         if (!memory_regions) {
             fprintf(stderr, "Failed to create memory_region array\n");
             cJSON_Delete(zone_ram_root);
@@ -1602,29 +1600,30 @@ int virtio_start_from_json_dynamic(char *json_path) {
             fprintf(stderr, "Failed to create root JSON object\n");
             return EXIT_FAILURE;
         }
-        cJSON *shm_regions = cJSON_AddArrayToObject(zone_shm_root, "shm_regions");
+        cJSON *shm_regions =
+            cJSON_AddArrayToObject(zone_shm_root, "shm_regions");
         if (!shm_regions) {
             fprintf(stderr, "Failed to create shm_regions array\n");
             cJSON_Delete(zone_shm_root);
             return EXIT_FAILURE;
         }
 
-    
         int chunk = 0;
         // Memory regions
-        
+
         int exist_shm_flag = 0;
 
         printf("[trace] ready to mmap regions");
         for (int j = 0; j < num_mems; j++) {
             cJSON *mem_region = cJSON_GetArrayItem(memory_region_json, j);
 
-            char *region_type = cJSON_GetObjectItem(mem_region, "type")->valuestring;
-            
+            char *region_type =
+                cJSON_GetObjectItem(mem_region, "type")->valuestring;
+
             zonex_ipa = strtoull(
                 cJSON_GetObjectItem(mem_region, "zonex_ipa")->valuestring, NULL,
                 16);
-            
+
             mem_size = strtoull(
                 cJSON_GetObjectItem(mem_region, "size")->valuestring, NULL, 16);
 
@@ -1643,8 +1642,7 @@ int virtio_start_from_json_dynamic(char *json_path) {
             while (kmalloc_info.size > 0) {
                 __u64 old_memsize = kmalloc_info.size;
 
-                long ret =
-                    ioctl(ko_fd, HVISOR_ZONE_M_ALLOC, &kmalloc_info);
+                long ret = ioctl(ko_fd, HVISOR_ZONE_M_ALLOC, &kmalloc_info);
                 __u64 zone0_ipa_chunk = kmalloc_info.pa;
                 if (ret) {
                     log_error("HVISOR_ZONE_M_ALLOC ioctl failed");
@@ -1654,20 +1652,26 @@ int virtio_start_from_json_dynamic(char *json_path) {
                 __u64 chunk_size = old_memsize - kmalloc_info.size;
                 __u64 zonex_ipa_chunk = zonex_ipa + offset;
 
-                __u64 virt_addr_chunk = (__u64)(uintptr_t)mmap(NULL, chunk_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                    ko_fd, (off_t)zone0_ipa_chunk);
+                __u64 virt_addr_chunk = (__u64)(uintptr_t)mmap(
+                    NULL, chunk_size, PROT_READ | PROT_WRITE, MAP_SHARED, ko_fd,
+                    (off_t)zone0_ipa_chunk);
 
                 if (virt_addr_chunk == (__u64)(uintptr_t)(void *)-1) {
                     log_error("virt_addr_chunk mmap failed");
                     err = -1;
                     goto err_out;
                 }
-                zone_mem[zone_id][chunk][VIRT_ADDR] = virt_addr_chunk;// the virtual address of the chunk for zone0_ipa
-                zone_mem[zone_id][chunk][ZONE0_IPA] = zone0_ipa_chunk;// one-to-one mapping (zone0_ipa == zone0_hpa)
+                zone_mem[zone_id][chunk][VIRT_ADDR] =
+                    virt_addr_chunk; // the virtual address of the chunk for
+                                     // zone0_ipa
+                zone_mem[zone_id][chunk][ZONE0_IPA] =
+                    zone0_ipa_chunk; // one-to-one mapping (zone0_ipa ==
+                                     // zone0_hpa)
                 zone_mem[zone_id][chunk][ZONEX_IPA] = zonex_ipa_chunk;
                 zone_mem[zone_id][chunk][MEM_SIZE] = chunk_size;
 
-                // save the memory region information to zone_ram_root(all types of memory regions)
+                // save the memory region information to zone_ram_root(all types
+                // of memory regions)
                 cJSON *region = cJSON_CreateObject();
                 char buf[128];
 
@@ -1679,28 +1683,39 @@ int virtio_start_from_json_dynamic(char *json_path) {
 
                 snprintf(buf, sizeof(buf), "0x%llx", zone0_ipa_chunk);
                 cJSON_AddStringToObject(region, "hpa", buf);
-                
+
                 snprintf(buf, sizeof(buf), "0x%llx", chunk_size);
                 cJSON_AddStringToObject(region, "size", buf);
 
                 cJSON_AddItemToArray(memory_regions, region);
 
-                // save the shm region information to zone_shm_root(only for shm)
+                // save the shm region information to zone_shm_root(only for
+                // shm)
                 if (strncmp(region_type, "shm", 3) == 0) {
                     cJSON *region = cJSON_CreateObject();
                     char buf[128];
-                    
-                    cJSON_AddStringToObject(region, "flag", cJSON_GetObjectItem(mem_region, "flag")->valuestring);
-    
-                    snprintf(buf, sizeof(buf), "0x%llx", zone0_ipa_chunk); // for linux, zone0_ram_ipa == zone0_ram_hpa
-                    cJSON_AddStringToObject(region, "zone0_ram_ipa", buf); // used for linux -> zonex (in linux address space)
 
-                    snprintf(buf, sizeof(buf), "0x%llx", zonex_ipa_chunk); // for linux, zone0_ram_ipa == zone0_ram_hpa
-                    cJSON_AddStringToObject(region, "zonex_ram_ipa", buf); // used for zonex -> zonex (in zonex address space)
-                    
+                    cJSON_AddStringToObject(
+                        region, "flag",
+                        cJSON_GetObjectItem(mem_region, "flag")->valuestring);
+
+                    snprintf(buf, sizeof(buf), "0x%llx",
+                             zone0_ipa_chunk); // for linux, zone0_ram_ipa ==
+                                               // zone0_ram_hpa
+                    cJSON_AddStringToObject(region, "zone0_ram_ipa",
+                                            buf); // used for linux -> zonex (in
+                                                  // linux address space)
+
+                    snprintf(buf, sizeof(buf), "0x%llx",
+                             zonex_ipa_chunk); // for linux, zone0_ram_ipa ==
+                                               // zone0_ram_hpa
+                    cJSON_AddStringToObject(region, "zonex_ram_ipa",
+                                            buf); // used for zonex -> zonex (in
+                                                  // zonex address space)
+
                     snprintf(buf, sizeof(buf), "0x%llx", chunk_size);
                     cJSON_AddStringToObject(region, "size", buf);
-    
+
                     cJSON_AddItemToArray(shm_regions, region);
 
                     exist_shm_flag = 1;
@@ -1720,15 +1735,16 @@ int virtio_start_from_json_dynamic(char *json_path) {
                 goto err_out;
             }
 
-            // create virtio mapping region for non root zone 
-            char* enable = cJSON_GetObjectItem(device, "status")->valuestring;
+            // create virtio mapping region for non root zone
+            char *enable = cJSON_GetObjectItem(device, "status")->valuestring;
             if (strcmp(enable, "disable") == 0) {
-                continue;   
+                continue;
             }
-            char* base_addr_str = cJSON_GetObjectItem(device, "addr")->valuestring;
-            char* len_str = cJSON_GetObjectItem(device, "len")->valuestring;
+            char *base_addr_str =
+                cJSON_GetObjectItem(device, "addr")->valuestring;
+            char *len_str = cJSON_GetObjectItem(device, "len")->valuestring;
             cJSON *virtio_region = cJSON_CreateObject();
-            
+
             char type_str[128] = "virtio";
             cJSON_AddStringToObject(virtio_region, "type", type_str);
             cJSON_AddStringToObject(virtio_region, "hpa", base_addr_str);
@@ -1758,7 +1774,7 @@ int virtio_start_from_json_dynamic(char *json_path) {
         fclose(fp);
         free(json_string);
         cJSON_Delete(zone_ram_root);
-        
+
         // save zone_shm_root to zone_shm_json
         if (exist_shm_flag) {
             json_string = cJSON_Print(zone_shm_root);
@@ -1779,7 +1795,7 @@ int virtio_start_from_json_dynamic(char *json_path) {
             fclose(fp);
             free(json_string);
             cJSON_Delete(zone_shm_root);
-            printf("SHM JSON file created successfully: %s\n", filename);    
+            printf("SHM JSON file created successfully: %s\n", filename);
         }
     }
 
@@ -1801,7 +1817,8 @@ int virtio_start(int argc, char *argv[]) {
 #ifdef LOONGARCH64
     err = virtio_start_from_json_dynamic(argv[3]);
 #else
-    err = virtio_start_from_json(argv[3]); // Start virtio devices based on virtio_cfg_*.json
+    err = virtio_start_from_json(
+        argv[3]); // Start virtio devices based on virtio_cfg_*.json
 #endif
 
     printf("[trace] virtio start from json over");
