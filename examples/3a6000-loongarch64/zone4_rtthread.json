@@ -1,0 +1,39 @@
+{
+  "arch": "loongarch64",
+  "name": "rthread",
+  "zone_id": 2,
+  "boot_method": "normal",
+  "cpus": [
+    6
+  ],
+  "memory_regions": [
+    {
+        "type": "io",
+        "physical_start": "0x1fe00000",
+        "virtual_start": "0x1fe00000",
+        "size": "0x2000"
+    },
+    {
+        "type": "io",
+        "physical_start": "0x10000000",
+        "virtual_start": "0x10000000",
+        "size": "0x20000"
+    }
+  ],
+  "interrupts": [
+  ],
+  "ivc_configs": [],
+  "kernel_args": "NOT_USED_YET",
+  "kernel_filepath": "./Guest/rtthread.bin",
+  "dtb_filepath": "./test.bin",
+  "kernel_load_paddr": "0x200000",
+  "dtb_load_paddr": "0xc0000000",
+  "entry_point": "9000000000200000",
+  "arch_config": {
+      "dummy": "0x1234"
+  },
+  "pci_config": {
+  },
+  "num_pci_devs": 0,
+  "alloc_pci_devs": []
+}

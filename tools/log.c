@@ -68,13 +68,17 @@ void log_log(int level, const char *file, int line, const char *fmt, ...) {
         return;
     }
 
-    /* Primary output to syslog */
     va_list ap;
     va_start(ap, fmt);
     char buf[2048];
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+
+    /* Output to syslog */
     syslog(syslog_levels[level], "%s:%d: %s", file, line, buf);
+
+    /* Also output to stderr so errors are visible in terminal */
+    fprintf(stderr, "[%s] %s:%d: %s\n", level_strings[level], file, line, buf);
 }
 
 void multithread_log_init() {
