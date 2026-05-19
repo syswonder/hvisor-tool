@@ -29,6 +29,7 @@
 #include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
+#include <net/if.h>
 
 #include "hvisor.h"
 #include "json_parse.h"
@@ -59,6 +60,39 @@ int vdevs_num;
 
 #define MAX_RAMS 4
 unsigned long long zone_mem[MAX_ZONES][MAX_RAMS][4];
+
+typedef struct virtio_memory_region_config {
+    uint64_t zone0_ipa;
+    uint64_t zonex_ipa;
+    uint64_t size;
+} VirtioMemoryRegionConfig;
+
+typedef struct virtio_device_config {
+    VirtioDeviceType type;
+    uint32_t zone_id;
+    uint64_t addr;
+    uint64_t len;
+    uint32_t irq;
+    bool enabled;
+    char img[PATH_MAX];
+    char tap[IFNAMSIZ];
+    uint8_t mac[6];
+    uint32_t width;
+    uint32_t height;
+} VirtioDeviceConfig;
+
+typedef struct virtio_zone_config {
+    uint32_t zone_id;
+    size_t memory_region_num;
+    VirtioMemoryRegionConfig memory_regions[MAX_RAMS];
+    size_t device_num;
+    VirtioDeviceConfig devices[MAX_DEVS];
+} VirtioZoneConfig;
+
+typedef struct virtio_config {
+    size_t zone_num;
+    VirtioZoneConfig zones[MAX_ZONES];
+} VirtioConfig;
 
 const char *virtio_device_type_to_string(VirtioDeviceType type) {
     switch (type) {
@@ -622,10 +656,9 @@ static const char *virtio_mmio_reg_name(uint64_t offset) {
 }
 
 uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
-    log_debug("READ virtio mmio at offset=%#x[%s], size=%d, vdev=%p, type=%d",
-              offset, virtio_mmio_reg_name(offset), size, vdev, vdev->type);
-
     if (!vdev) {
+        log_debug("READ unmatched virtio mmio at offset=%#x[%s], size=%d",
+                  offset, virtio_mmio_reg_name(offset), size);
         switch (offset) {
         case VIRTIO_MMIO_MAGIC_VALUE:
             log_debug("read VIRTIO_MMIO_MAGIC_VALUE");
@@ -640,6 +673,9 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
             return 0;
         }
     }
+
+    log_debug("READ virtio mmio at offset=%#x[%s], size=%d, vdev=%p, type=%d",
+              offset, virtio_mmio_reg_name(offset), size, vdev, vdev->type);
 
     if (offset >= VIRTIO_MMIO_CONFIG) {
         offset -= VIRTIO_MMIO_CONFIG;
@@ -724,6 +760,13 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
 
 void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
                        unsigned size) {
+    if (!vdev) {
+        log_debug("WRITE unmatched virtio mmio at offset=%#x[%s], value=%#x, "
+                  "size=%d",
+                  offset, virtio_mmio_reg_name(offset), value, size);
+        return;
+    }
+
     log_debug("WRITE virtio mmio at offset=%#x[%s], value=%#x, size=%d, "
               "vdev=%p, type=%d",
               offset, virtio_mmio_reg_name(offset), value, size, vdev,
@@ -731,9 +774,6 @@ void virtio_mmio_write(VirtIODevice *vdev, uint64_t offset, uint64_t value,
 
     VirtMmioRegs *regs = &vdev->regs;
     VirtQueue *vqs = vdev->vqs;
-    if (!vdev) {
-        return;
-    }
 
     if (offset >= VIRTIO_MMIO_CONFIG) {
         offset -= VIRTIO_MMIO_CONFIG;
@@ -1302,103 +1342,297 @@ unmap:
     return -1;
 }
 
-int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
-    VirtioDeviceType dev_type = VirtioTNone;
-    uint64_t base_addr = 0, len = 0;
-    uint32_t irq_id = 0;
-
-    char *status =
-        SAFE_CJSON_GET_OBJECT_ITEM(device_json, "status")->valuestring;
-    if (strcmp(status, "disable") == 0)
-        return 0;
-
-    // Get device type
-    char *type = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "type")->valuestring;
-    void *arg0, *arg1;
-
-    // Match the device type field in json
+static int parse_virtio_device_type(const char *type,
+                                    VirtioDeviceType *dev_type) {
     if (strcmp(type, "blk") == 0) {
-        dev_type = VirtioTBlock;
+        *dev_type = VirtioTBlock;
     } else if (strcmp(type, "net") == 0) {
-        dev_type = VirtioTNet;
+        *dev_type = VirtioTNet;
     } else if (strcmp(type, "console") == 0) {
-        dev_type = VirtioTConsole;
+        *dev_type = VirtioTConsole;
     } else if (strcmp(type, "gpu") == 0) {
-        dev_type = VirtioTGPU;
+        *dev_type = VirtioTGPU;
     } else {
         log_error("unknown device type %s", type);
         return -1;
     }
+    return 0;
+}
 
-    // Get base_addr, len, irq_id (mmio region base address and length, device
-    // interrupt number)
+static int parse_virtio_device_config(cJSON *device_json, uint32_t zone_id,
+                                      VirtioDeviceConfig *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->zone_id = zone_id;
+
+    cJSON *status_json = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "status");
+    if (!cJSON_IsString(status_json)) {
+        log_error("failed to parse device status");
+        return -1;
+    }
+    if (strcmp(status_json->valuestring, "disable") == 0) {
+        cfg->enabled = false;
+        return 0;
+    }
+    if (strcmp(status_json->valuestring, "enable") != 0) {
+        log_error("unknown device status %s", status_json->valuestring);
+        return -1;
+    }
+    cfg->enabled = true;
+
+    cJSON *type_json = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "type");
+    if (!cJSON_IsString(type_json) ||
+        parse_virtio_device_type(type_json->valuestring, &cfg->type) != 0) {
+        log_error("failed to parse device type");
+        return -1;
+    }
+
     if (parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "addr"),
-                       &base_addr) != 0 ||
-        parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "len"), &len) !=
-            0 ||
+                       &cfg->addr) != 0 ||
+        parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "len"),
+                       &cfg->len) != 0 ||
         parse_json_u32(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "irq"),
-                       &irq_id) != 0) {
+                       &cfg->irq) != 0) {
         log_error("failed to parse addr, len, or irq");
         return -1;
     }
 
-    // Handle other fields according to the device type
-    if (dev_type == VirtioTBlock) {
-        // virtio-blk
-        char *img = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "img")->valuestring;
-        arg0 = img, arg1 = NULL;
-        log_info("debug: img is %s", img);
-    } else if (dev_type == VirtioTNet) {
-        // virtio-net
-        char *tap = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "tap")->valuestring;
+    if (cfg->addr == 0 || cfg->len == 0 || cfg->irq == 0) {
+        log_error("missing arguments");
+        return -1;
+    }
+
+    if (cfg->type == VirtioTBlock) {
+        cJSON *img_json = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "img");
+        if (!cJSON_IsString(img_json) || img_json->valuestring[0] == '\0') {
+            log_error("failed to parse blk img");
+            return -1;
+        }
+        if (strlen(img_json->valuestring) >= sizeof(cfg->img)) {
+            log_error("blk img path is too long");
+            return -1;
+        }
+        strncpy(cfg->img, img_json->valuestring, sizeof(cfg->img) - 1);
+        log_info("debug: img is %s", cfg->img);
+    } else if (cfg->type == VirtioTNet) {
+        cJSON *tap_json = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "tap");
+        if (!cJSON_IsString(tap_json) || tap_json->valuestring[0] == '\0') {
+            log_error("failed to parse net tap");
+            return -1;
+        }
+        if (strlen(tap_json->valuestring) >= sizeof(cfg->tap)) {
+            log_error("net tap name is too long");
+            return -1;
+        }
+        strncpy(cfg->tap, tap_json->valuestring, sizeof(cfg->tap) - 1);
         cJSON *mac_json = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "mac");
-        uint8_t mac[6];
+        if (SAFE_CJSON_GET_ARRAY_SIZE(mac_json) != 6) {
+            log_error("mac address should have 6 bytes");
+            return -1;
+        }
         for (int i = 0; i < 6; i++) {
             if (parse_json_u8(SAFE_CJSON_GET_ARRAY_ITEM(mac_json, i),
-                              &mac[i]) != 0) {
+                              &cfg->mac[i]) != 0) {
                 log_error("failed to parse mac address");
                 return -1;
             }
         }
-        arg0 = mac, arg1 = tap;
-    } else if (dev_type == VirtioTConsole) {
-        // virtio-console
-        arg0 = arg1 = NULL;
-    } else if (dev_type == VirtioTGPU) {
-// virtio-gpu
-#ifdef ENABLE_VIRTIO_GPU
-        // TODO: Add display device settings
-        GPURequestedState *requested_state = NULL;
-        requested_state =
-            (GPURequestedState *)malloc(sizeof(GPURequestedState));
-        memset(requested_state, 0, sizeof(GPURequestedState));
+    } else if (cfg->type == VirtioTGPU) {
         if (parse_json_u32(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "width"),
-                           &requested_state->width) != 0 ||
+                           &cfg->width) != 0 ||
             parse_json_u32(SAFE_CJSON_GET_OBJECT_ITEM(device_json, "height"),
-                           &requested_state->height) != 0) {
+                           &cfg->height) != 0) {
             log_error("failed to parse gpu width or height");
-            free(requested_state);
             return -1;
         }
+    }
+
+    return 0;
+}
+
+static int create_virtio_device_from_config(const VirtioDeviceConfig *cfg) {
+    void *arg0 = NULL, *arg1 = NULL;
+
+    if (!cfg->enabled)
+        return 0;
+
+    switch (cfg->type) {
+    case VirtioTBlock:
+        arg0 = (void *)cfg->img;
+        break;
+    case VirtioTNet:
+        arg0 = (void *)cfg->mac;
+        arg1 = (void *)cfg->tap;
+        break;
+    case VirtioTConsole:
+        break;
+    case VirtioTGPU:
+#ifdef ENABLE_VIRTIO_GPU
+        GPURequestedState *requested_state = NULL;
+        requested_state = (GPURequestedState *)malloc(sizeof(*requested_state));
+        if (!requested_state) {
+            log_error("failed to allocate gpu requested state");
+            return -1;
+        }
+        memset(requested_state, 0, sizeof(*requested_state));
+        requested_state->width = cfg->width;
+        requested_state->height = cfg->height;
         arg0 = requested_state;
-        arg1 = NULL;
 #else
         log_error(
             "virtio-gpu is not enabled, please add VIRTIO_GPU=y in make cmd");
         return -1;
 #endif
-    }
-
-    // Check for missing fields
-    if (base_addr == 0 || len == 0 || irq_id == 0) {
-        log_error("missing arguments");
+        break;
+    default:
+        log_error("unsupported virtio device type");
         return -1;
     }
 
-    // Create virtio_device
-    if (!create_virtio_device(dev_type, zone_id, base_addr, len, irq_id, arg0,
-                              arg1)) {
+    if (!create_virtio_device(cfg->type, cfg->zone_id, cfg->addr, cfg->len,
+                              cfg->irq, arg0, arg1)) {
         return -1;
+    }
+
+    return 0;
+}
+
+int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
+    VirtioDeviceConfig cfg;
+
+    if (parse_virtio_device_config(device_json, zone_id, &cfg) != 0) {
+        return -1;
+    }
+
+    if (create_virtio_device_from_config(&cfg) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int parse_virtio_memory_region_config(cJSON *mem_region,
+                                             VirtioMemoryRegionConfig *cfg) {
+    if (parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zone0_ipa"),
+                       &cfg->zone0_ipa) != 0 ||
+        parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zonex_ipa"),
+                       &cfg->zonex_ipa) != 0 ||
+        parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "size"),
+                       &cfg->size) != 0) {
+        log_error("failed to parse memory region");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int parse_virtio_zone_config(cJSON *zone_json, VirtioZoneConfig *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+
+    if (parse_json_u32(SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "id"),
+                       &cfg->zone_id) != 0) {
+        log_error("failed to parse zone id");
+        return -1;
+    }
+    if (cfg->zone_id >= MAX_ZONES) {
+        log_error("Exceed maximum zone number");
+        return -1;
+    }
+
+    cJSON *memory_region_json =
+        SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "memory_region");
+    size_t num_mems = SAFE_CJSON_GET_ARRAY_SIZE(memory_region_json);
+    if (num_mems > MAX_RAMS) {
+        log_error("Exceed maximum RAM region number");
+        return -1;
+    }
+    cfg->memory_region_num = num_mems;
+
+    for (size_t i = 0; i < num_mems; i++) {
+        if (parse_virtio_memory_region_config(
+                SAFE_CJSON_GET_ARRAY_ITEM(memory_region_json, i),
+                &cfg->memory_regions[i]) != 0) {
+            return -1;
+        }
+    }
+
+    cJSON *devices_json = SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "devices");
+    size_t num_devices = SAFE_CJSON_GET_ARRAY_SIZE(devices_json);
+    if (num_devices > MAX_DEVS) {
+        log_error("Exceed maximum virtio device number");
+        return -1;
+    }
+    cfg->device_num = num_devices;
+
+    for (size_t i = 0; i < num_devices; i++) {
+        if (parse_virtio_device_config(
+                SAFE_CJSON_GET_ARRAY_ITEM(devices_json, i), cfg->zone_id,
+                &cfg->devices[i]) != 0) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int parse_virtio_config(cJSON *root, VirtioConfig *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+
+    cJSON *zones_json = SAFE_CJSON_GET_OBJECT_ITEM(root, "zones");
+    size_t num_zones = SAFE_CJSON_GET_ARRAY_SIZE(zones_json);
+    if (num_zones > MAX_ZONES) {
+        log_error("Exceed maximum zone number");
+        return -1;
+    }
+    cfg->zone_num = num_zones;
+
+    for (size_t i = 0; i < num_zones; i++) {
+        if (parse_virtio_zone_config(SAFE_CJSON_GET_ARRAY_ITEM(zones_json, i),
+                                     &cfg->zones[i]) != 0) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int mmap_virtio_zone_memory(const VirtioZoneConfig *cfg) {
+    for (size_t i = 0; i < cfg->memory_region_num; i++) {
+        const VirtioMemoryRegionConfig *mem = &cfg->memory_regions[i];
+        if (mem->size == 0) {
+            log_error("Invalid memory size");
+            continue;
+        }
+
+        log_info("debug: zone0_ipa is %lx, zonex_ipa is %lx, mem_size is %lx",
+                 mem->zone0_ipa, mem->zonex_ipa, mem->size);
+
+        void *virt_addr = mmap(NULL, mem->size, PROT_READ | PROT_WRITE,
+                               MAP_SHARED, ko_fd, (off_t)mem->zone0_ipa);
+
+        log_info("debug: mmap zone0_ipa is %lx, zonex_ipa is %lx, "
+                 "mem_size is %lx finished",
+                 mem->zone0_ipa, mem->zonex_ipa, mem->size);
+
+        if (virt_addr == (void *)-1) {
+            log_error("mmap failed");
+            return -1;
+        }
+
+        zone_mem[cfg->zone_id][i][VIRT_ADDR] = (uintptr_t)virt_addr;
+        zone_mem[cfg->zone_id][i][ZONE0_IPA] = mem->zone0_ipa;
+        zone_mem[cfg->zone_id][i][ZONEX_IPA] = mem->zonex_ipa;
+        zone_mem[cfg->zone_id][i][MEM_SIZE] = mem->size;
+    }
+
+    return 0;
+}
+
+static int create_virtio_zone_devices(const VirtioZoneConfig *cfg) {
+    for (size_t i = 0; i < cfg->device_num; i++) {
+        if (create_virtio_device_from_config(&cfg->devices[i]) != 0) {
+            log_error("create virtio device failed");
+            return -1;
+        }
     }
 
     return 0;
@@ -1407,105 +1641,33 @@ int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
 int virtio_start_from_json(char *json_path) {
     char *buffer = NULL;
     uint64_t file_size;
-    int zone_id, num_devices = 0, err = 0, num_zones = 0;
-    void *zone0_ipa, *zonex_ipa, *virt_addr;
-    unsigned long long mem_size;
+    int err = 0;
+    VirtioConfig config;
     buffer = read_file(json_path, &file_size);
     buffer[file_size] = '\0';
 
-    // Read zones
     cJSON *root = SAFE_CJSON_PARSE(buffer);
-    cJSON *zones_json = SAFE_CJSON_GET_OBJECT_ITEM(root, "zones");
-    num_zones = SAFE_CJSON_GET_ARRAY_SIZE(zones_json);
-    if (num_zones > MAX_ZONES) {
-        log_error("Exceed maximum zone number");
+    if (!root) {
         err = -1;
         goto err_out;
     }
 
-    // Match zone information
-    for (int i = 0; i < num_zones; i++) {
-        cJSON *zone_json = SAFE_CJSON_GET_ARRAY_ITEM(zones_json, i);
-        cJSON *zone_id_json = SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "id");
-        cJSON *memory_region_json =
-            SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "memory_region");
-        cJSON *devices_json = SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "devices");
-        uint32_t parsed_zone_id;
-        if (parse_json_u32(zone_id_json, &parsed_zone_id) != 0) {
-            log_error("failed to parse zone id");
+    if (parse_virtio_config(root, &config) != 0) {
+        err = -1;
+        goto err_out;
+    }
+
+    for (size_t i = 0; i < config.zone_num; i++) {
+        if (mmap_virtio_zone_memory(&config.zones[i]) != 0 ||
+            create_virtio_zone_devices(&config.zones[i]) != 0) {
             err = -1;
             goto err_out;
-        }
-        zone_id = (int)parsed_zone_id;
-        if (zone_id >= MAX_ZONES) {
-            log_error("Exceed maximum zone number");
-            err = -1;
-            goto err_out;
-        }
-        int num_mems = SAFE_CJSON_GET_ARRAY_SIZE(memory_region_json);
-
-        // Memory regions
-        for (int j = 0; j < num_mems; j++) {
-            cJSON *mem_region =
-                SAFE_CJSON_GET_ARRAY_ITEM(memory_region_json, j);
-            uintptr_t zone0_ipa_val = 0, zonex_ipa_val = 0;
-            uint64_t mem_size_val = 0;
-            if (parse_json_address(
-                    SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zone0_ipa"),
-                    &zone0_ipa_val) != 0 ||
-                parse_json_address(
-                    SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "zonex_ipa"),
-                    &zonex_ipa_val) != 0 ||
-                parse_json_u64(SAFE_CJSON_GET_OBJECT_ITEM(mem_region, "size"),
-                               &mem_size_val) != 0) {
-                log_error("failed to parse memory region");
-                err = -1;
-                goto err_out;
-            }
-            zone0_ipa = (void *)zone0_ipa_val;
-            zonex_ipa = (void *)zonex_ipa_val;
-            mem_size = mem_size_val;
-            if (mem_size == 0) {
-                log_error("Invalid memory size");
-                continue;
-            }
-
-            log_info(
-                "debug: zone0_ipa is %lx, zonex_ipa is %lx, mem_size is %lx",
-                zone0_ipa, zonex_ipa, mem_size);
-
-            // Map from zone0_ipa
-            virt_addr = mmap(NULL, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                             ko_fd, (off_t)zone0_ipa);
-
-            log_info("debug: mmap zone0_ipa is %lx, zonex_ipa is %lx, "
-                     "mem_size is %lx finished",
-                     zone0_ipa, zonex_ipa, mem_size);
-
-            if (virt_addr == (void *)-1) {
-                log_error("mmap failed");
-                err = -1;
-                goto err_out;
-            }
-            zone_mem[zone_id][j][VIRT_ADDR] = (uintptr_t)virt_addr;
-            zone_mem[zone_id][j][ZONE0_IPA] = (uintptr_t)zone0_ipa;
-            zone_mem[zone_id][j][ZONEX_IPA] = (uintptr_t)zonex_ipa;
-            zone_mem[zone_id][j][MEM_SIZE] = mem_size;
-        }
-
-        num_devices = SAFE_CJSON_GET_ARRAY_SIZE(devices_json);
-        for (int j = 0; j < num_devices; j++) {
-            cJSON *device = SAFE_CJSON_GET_ARRAY_ITEM(devices_json, j);
-            err = create_virtio_device_from_json(device, zone_id);
-            if (err) {
-                log_error("create virtio device failed");
-                goto err_out;
-            }
         }
     }
 
 err_out:
-    cJSON_Delete(root);
+    if (root)
+        cJSON_Delete(root);
     free(buffer);
     return err;
 }
