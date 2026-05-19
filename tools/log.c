@@ -65,7 +65,12 @@ void log_log(int level, const char *file, int line, const char *fmt, ...) {
     char buf[2048];
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+<<<<<<< HEAD
     syslog(level, "%s:%d: %s", file, line, buf);
+=======
+    printf("%s:%d: %s\n", file, line, buf);
+    syslog(syslog_levels[level], "%s:%d: %s", file, line, buf);
+>>>>>>> c2ebd21 (Update UEFI Config.)
 }
 
 void multithread_log_init() {
