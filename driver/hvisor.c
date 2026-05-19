@@ -11,16 +11,23 @@
 #include <asm/cacheflush.h>
 #include <linux/eventfd.h>
 #include <linux/gfp.h>
+#include <linux/hrtimer.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/kthread.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/of_reserved_mem.h>
+#ifdef LOONGARCH64
+#include <linux/irq.h>
+#include <linux/irqdesc.h>
+#include <linux/irqdomain.h>
+#endif
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -31,18 +38,83 @@
 #include "hvisor.h"
 #include "zone_config.h"
 
+/* MAX_ORDER was renamed to MAX_PAGE_ORDER in kernel 6.3,
+ * and its semantics changed in 6.1: before 6.1 MAX_ORDER was the number
+ * of orders (max valid order = MAX_ORDER-1), from 6.1 onwards it is the
+ * max valid order itself. */
+#ifndef MAX_PAGE_ORDER
+/* old kernel: MAX_ORDER is count, subtract 1 to get max valid order */
+#define MAX_PAGE_ORDER (MAX_ORDER - 1)
+#endif
+
 struct virtio_bridge *virtio_bridge;
 int virtio_irq = -1;
 static struct task_struct *task = NULL;
 struct eventfd_ctx *virtio_irq_ctx = NULL;
+#ifdef LOONGARCH64
+/* per-CPU cookie required by request_percpu_irq for the IPI line */
+static DEFINE_PER_CPU(int, hvisor_percpu_dev);
+static bool hvisor_irq_is_percpu = false;
+
+/* kthread for polling virtio_bridge->need_wakeup when no usable IRQ exists.
+ * Hypervisor sets need_wakeup != 0 to notify root zone; we clear it and
+ * signal the userspace virtio daemon via eventfd.
+ * Uses a waitqueue so the thread sleeps properly instead of busy-looping. */
+static struct task_struct *hvisor_poll_thread = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(hvisor_poll_wq);
+static atomic_t hvisor_poll_pending = ATOMIC_INIT(0);
+
+/* hrtimer fires every 1ms to wake the poll thread */
+static struct hrtimer hvisor_poll_timer;
+
+static enum hrtimer_restart hvisor_poll_timer_fn(struct hrtimer *timer) {
+    atomic_set(&hvisor_poll_pending, 1);
+    wake_up(&hvisor_poll_wq);
+    hrtimer_forward_now(timer, ms_to_ktime(1));
+    return HRTIMER_RESTART;
+}
+
+static int hvisor_poll_fn(void *unused) {
+    while (!kthread_should_stop()) {
+        /* Sleep until someone calls wake_up(&hvisor_poll_wq) or the thread
+         * is asked to stop. */
+        wait_event_interruptible(hvisor_poll_wq,
+                                 atomic_read(&hvisor_poll_pending) ||
+                                     kthread_should_stop());
+
+        if (kthread_should_stop())
+            break;
+
+        atomic_set(&hvisor_poll_pending, 0);
+
+        if (virtio_bridge && READ_ONCE(virtio_bridge->need_wakeup)) {
+            WRITE_ONCE(virtio_bridge->need_wakeup, 0);
+            if (virtio_irq_ctx) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+                eventfd_signal(virtio_irq_ctx);
+#else
+                eventfd_signal(virtio_irq_ctx, 1);
+#endif
+            }
+        }
+    }
+    return 0;
+}
+#endif
 
 // initial virtio el2 shared region
 static int hvisor_init_virtio(void) {
     int err;
+
+#ifdef LOONGARCH64
+// do nothing
+#elif
     if (virtio_irq == -1) {
         pr_err("virtio device is not available\n");
         return ENOTTY;
     }
+#endif
+
     virtio_bridge = (struct virtio_bridge *)__get_free_pages(GFP_KERNEL, 0);
     if (virtio_bridge == NULL)
         return -ENOMEM;
@@ -52,6 +124,14 @@ static int hvisor_init_virtio(void) {
     err = hvisor_call(HVISOR_HC_INIT_VIRTIO, __pa(virtio_bridge), 0);
     if (err)
         return err;
+#ifdef LOONGARCH64
+    /* Start the polling thread after virtio_bridge is ready */
+    if (hvisor_poll_thread) {
+        wake_up_process(hvisor_poll_thread);
+        /* Start the 1ms hrtimer that periodically wakes the poll thread */
+        hrtimer_start(&hvisor_poll_timer, ms_to_ktime(1), HRTIMER_MODE_REL);
+    }
+#endif
     return 0;
 }
 
@@ -230,15 +310,145 @@ static int hvisor_zone_list(zone_list_args_t __user *arg) {
         pr_err("hvisor.ko: failed to get zone list\n");
         goto out;
     }
+
     // copy result back to user space
     if (copy_to_user(args.zones, zones, ret * sizeof(zone_info_t))) {
         pr_err("hvisor.ko: failed to copy to user\n");
         goto out;
     }
+
 out:
     kfree(zones);
     return ret;
 }
+
+#ifdef LOONGARCH64
+/* Track all pages allocated via hvisor_m_alloc so they can be freed
+ * automatically when the daemon exits (file release). */
+struct hvisor_alloc_entry {
+    unsigned long vaddr;
+    unsigned int order;
+    struct file *owner; /* the fd that allocated this block */
+    struct list_head list;
+};
+static LIST_HEAD(hvisor_alloc_list);
+static DEFINE_SPINLOCK(hvisor_alloc_lock);
+
+// order <= MAX_ORDER-1, size <= (PAGE_SIZE << (MAX_ORDER-1))
+// actual max depends on kernel buddy system configuration (MAX_ORDER)
+static unsigned long hvisor_m_alloc(struct file *file,
+                                    kmalloc_info_t __user *arg) {
+    kmalloc_info_t kmalloc_info;
+
+    if (copy_from_user(&kmalloc_info, arg, sizeof(kmalloc_info))) {
+        pr_err("hvisor: failed to copy from user\n");
+        return -EFAULT;
+    }
+
+    if (kmalloc_info.size == 0) {
+        pr_err("hvisor: invalid allocation size 0\n");
+        return -EINVAL;
+    }
+
+    __u64 reduced_size = kmalloc_info.size;
+
+    void *area;
+    /* Use ilog2 (floor to power-of-2) instead of get_order (ceil),
+     * then convert size -> order by subtracting PAGE_SHIFT.
+     * This avoids over-allocating when size is not a power-of-2.
+     * e.g. 0x2f000000 (752MB): get_order gives order for 1GB (wasteful),
+     *      ilog2 gives order for 512MB (exact largest fitting block). */
+    unsigned int order = min_t(
+        unsigned int,
+        ilog2(reduced_size) > PAGE_SHIFT ? ilog2(reduced_size) - PAGE_SHIFT : 0,
+        MAX_PAGE_ORDER);
+
+    // try allocate from big area to small area
+    area = (void *)__get_free_pages(GFP_KERNEL, order);
+    while (area == NULL) {
+        if (order == 0) {
+            pr_err("hvisor: failed to allocate memory, size %llx\n",
+                   kmalloc_info.size);
+            return -ENOMEM;
+        }
+        order--;
+        area = (void *)__get_free_pages(GFP_KERNEL, order);
+    }
+
+    reduced_size = PAGE_SIZE << order;
+
+    SetPageReserved(virt_to_page(area));
+    memset(area, 0, reduced_size);
+
+    /* Record this allocation for automatic cleanup on release */
+    struct hvisor_alloc_entry *entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+    if (entry) {
+        entry->vaddr = (unsigned long)area;
+        entry->order = order;
+        entry->owner = file;
+        spin_lock(&hvisor_alloc_lock);
+        list_add(&entry->list, &hvisor_alloc_list);
+        spin_unlock(&hvisor_alloc_lock);
+    }
+
+    if (reduced_size < kmalloc_info.size) {
+        kmalloc_info.size -= reduced_size;
+    } else {
+        kmalloc_info.size = 0;
+    }
+
+    kmalloc_info.pa = __pa(area);
+
+    // copy result back to user space
+    if (copy_to_user(arg, &kmalloc_info, sizeof(kmalloc_info))) {
+        pr_err("hvisor: failed to copy to user\n");
+        ClearPageReserved(virt_to_page(area));
+        free_pages((unsigned long)area, order);
+        return -EFAULT;
+    }
+
+    // pr_info("allocate memory: reduced_size %llx, order %u, area %px, size
+    // %llx, pa : %llx\n",
+    //     reduced_size, order, area, kmalloc_info.size, __pa(area));
+
+    return 0;
+}
+static int hvisor_m_free(kmalloc_info_t __user *arg) {
+    // TODO: check this for Memory Region of Non root Zone!
+    kmalloc_info_t kmalloc_info;
+
+    if (copy_from_user(&kmalloc_info, arg, sizeof(kmalloc_info))) {
+        pr_err("hvisor: failed to copy from user\n");
+        return -EFAULT;
+    }
+
+    void *area = (void *)__va(kmalloc_info.pa);
+    unsigned int order = get_order(kmalloc_info.size);
+
+    /* Remove from tracking list */
+    struct hvisor_alloc_entry *entry, *tmp;
+    spin_lock(&hvisor_alloc_lock);
+    list_for_each_entry_safe(entry, tmp, &hvisor_alloc_list, list) {
+        if (entry->vaddr == (unsigned long)area) {
+            order = entry->order;
+            list_del(&entry->list);
+            kfree(entry);
+            break;
+        }
+    }
+    spin_unlock(&hvisor_alloc_lock);
+
+    // Clear the PageReserved bit
+    ClearPageReserved(virt_to_page(area));
+
+    // Free the allocated pages
+    free_pages((unsigned long)area, order);
+
+    // pr_info("freed memory: area %px, size %llx, pa : %llx\n",
+    //     area, kmalloc_info.size, kmalloc_info.pa);
+    return 0;
+}
+#endif
 
 static long hvisor_ioctl(struct file *file, unsigned int ioctl,
                          unsigned long arg) {
@@ -281,6 +491,14 @@ static long hvisor_ioctl(struct file *file, unsigned int ioctl,
     case HVISOR_CLEAR_INJECT_IRQ:
         err = hvisor_call(HVISOR_HC_CLEAR_INJECT_IRQ, 0, 0);
         break;
+    // for dynamic memory allocation from Heap of Root Linux
+    // --boneinscri 2026.04
+    case HVISOR_ZONE_M_ALLOC:
+        err = hvisor_m_alloc(file, (kmalloc_info_t __user *)arg);
+        break;
+    case HVISOR_ZONE_M_FREE:
+        err = hvisor_m_free((kmalloc_info_t __user *)arg);
+        break;
 #endif
     default:
         err = -EINVAL;
@@ -321,11 +539,41 @@ static int hvisor_map(struct file *filp, struct vm_area_struct *vma) {
     return 0;
 }
 
+#ifdef LOONGARCH64
+/* Called when the last file descriptor to /dev/hvisor is closed (daemon exit).
+ * Frees all pages that were allocated via hvisor_m_alloc but never freed. */
+static int hvisor_release(struct inode *inode, struct file *file) {
+    struct hvisor_alloc_entry *entry, *tmp;
+    LIST_HEAD(to_free);
+
+    spin_lock(&hvisor_alloc_lock);
+    list_for_each_entry_safe(entry, tmp, &hvisor_alloc_list, list) {
+        if (entry->owner == file) {
+            list_move(&entry->list, &to_free);
+        }
+    }
+    spin_unlock(&hvisor_alloc_lock);
+
+    list_for_each_entry_safe(entry, tmp, &to_free, list) {
+        pr_info("hvisor: release cleanup: freeing vaddr %lx order %u\n",
+                entry->vaddr, entry->order);
+        ClearPageReserved(virt_to_page((void *)entry->vaddr));
+        free_pages(entry->vaddr, entry->order);
+        list_del(&entry->list);
+        kfree(entry);
+    }
+    return 0;
+}
+#endif
+
 static const struct file_operations hvisor_fops = {
     .owner = THIS_MODULE,
     .unlocked_ioctl = hvisor_ioctl,
     .compat_ioctl = hvisor_ioctl,
     .mmap = hvisor_map,
+#ifdef LOONGARCH64
+    .release = hvisor_release,
+#endif
 };
 
 static struct miscdevice hvisor_misc_dev = {
@@ -385,24 +633,120 @@ static int __init hvisor_init(void) {
     // The irq number must be retrieved from dtb node, because it is different
     // from GIC's IRQ number.
     node = of_find_node_by_path("/hvisor_virtio_device");
+#ifdef LOONGARCH64
     if (!node) {
-        pr_err("Critical: Missing device tree node!\n");
-        pr_err("   Please add the following to your device tree:\n");
-        pr_err("   hvisor_virtio_device {\n");
-        pr_err("       compatible = \"hvisor\";\n");
-        pr_err("       interrupts = <0x00 0x20 0x01>;\n");
-        pr_err("   };\n");
-        return -ENODEV;
+        // LoongArch64 booting via ACPI (no DTB).
+        // Strategy: try to map SWI0 (hwirq 0) on the CPUINTC domain and
+        // register a per-CPU IRQ handler. Hypervisor triggers SWI0 by
+        // writing ESTAT.SIP0 (bit 0) in the guest CSR.
+        //
+        // The CPUINTC domain is created with irq_domain_alloc_named_fwnode(
+        // "CPUINTC") so we find it via irq_find_matching_fwnode().
+        // loongarch_cpu_intc_map() has no hwirq range restriction, so
+        // hwirq 0 (SWI0) and hwirq 1 (SWI1) are fully supported.
+        // init_IRQ() already enables ECFGF_SIP0 in CSR.ECFG, so the
+        // interrupt line is live as soon as we register a handler.
+        struct fwnode_handle *fwnode;
+        struct irq_domain *cpuintc_domain = NULL;
+
+        fwnode = irq_domain_alloc_named_fwnode("CPUINTC");
+        if (fwnode) {
+            cpuintc_domain = irq_find_matching_fwnode(fwnode, DOMAIN_BUS_ANY);
+            irq_domain_free_fwnode(fwnode);
+        }
+
+        if (!cpuintc_domain) {
+            // Fallback: scan existing mappings to find the CPUINTC domain
+            int i;
+            for (i = 1; i < NR_IRQS; i++) {
+                struct irq_data *d = irq_get_irq_data(i);
+                if (!d || !d->domain || !d->domain->fwnode)
+                    continue;
+                if (strstr(fwnode_get_name(d->domain->fwnode), "CPUINTC")) {
+                    cpuintc_domain = d->domain;
+                    break;
+                }
+            }
+        }
+
+        if (cpuintc_domain) {
+            virtio_irq = irq_create_mapping(cpuintc_domain, 0);
+            pr_info("hvisor: SWI0 mapped to Linux IRQ %d\n", virtio_irq);
+            if (virtio_irq > 0) {
+                irq_set_handler(virtio_irq, handle_simple_irq);
+                err = request_irq(virtio_irq, virtio_irq_handler, 0,
+                                  "hvisor_virtio_device", &hvisor_misc_dev);
+                if (!err) {
+                    pr_info("hvisor: ACPI boot, using SWI0 Linux IRQ %d\n",
+                            virtio_irq);
+                    goto init_done;
+                }
+                pr_warn("hvisor: request_irq for SWI0 failed (%d), "
+                        "falling back to kthread poll\n",
+                        err);
+                virtio_irq = -1;
+            }
+        }
+        of_node_put(node);
+        goto init_done;
+        // Fallback: kthread + hrtimer polling when IRQ registration fails
+        //         pr_warn("hvisor: cannot register SWI0 IRQ, using kthread
+        //         poll\n"); hvisor_poll_thread = kthread_create(hvisor_poll_fn,
+        //         NULL,
+        //                                             "hvisor_poll");
+        //         if (IS_ERR(hvisor_poll_thread)) {
+        //             pr_err("hvisor: failed to create poll thread: %ld\n",
+        //                    PTR_ERR(hvisor_poll_thread));
+        //             hvisor_poll_thread = NULL;
+        //             misc_deregister(&hvisor_misc_dev);
+        //             return -ENOMEM;
+        //         }
+        // #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+        //         hrtimer_setup(&hvisor_poll_timer, hvisor_poll_timer_fn,
+        //                       CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+        // #else
+        //         hrtimer_init(&hvisor_poll_timer, CLOCK_MONOTONIC,
+        //         HRTIMER_MODE_REL); hvisor_poll_timer.function =
+        //         hvisor_poll_timer_fn;
+        // #endif
+        //         goto init_done;
+    } else
+#endif /* LOONGARCH64 */
+        if (!node) {
+            pr_err("Critical: Missing device tree node!\n");
+            pr_err("   Please add the following to your device tree:\n");
+            pr_err("   hvisor_virtio_device {\n");
+            pr_err("       compatible = \"hvisor\";\n");
+            pr_err("       interrupts = <0x00 0x20 0x01>;\n");
+            pr_err("   };\n");
+            misc_deregister(&hvisor_misc_dev);
+            return -ENODEV;
+        } else {
+            virtio_irq = of_irq_get(node, 0);
+            of_node_put(node);
+        }
+
+#ifdef LOONGARCH64
+    if (hvisor_irq_is_percpu) {
+        err = request_percpu_irq(virtio_irq, virtio_irq_handler,
+                                 "hvisor_virtio_device", &hvisor_percpu_dev);
+        if (err)
+            goto err_out;
+        enable_percpu_irq(virtio_irq, IRQ_TYPE_NONE);
+    } else
+#endif
+    {
+        err = request_irq(virtio_irq, virtio_irq_handler,
+#ifdef LOONGARCH64
+                          IRQF_SHARED, "hvisor_virtio_device",
+#else
+                          IRQF_SHARED | IRQF_TRIGGER_RISING,
+                          "hvisor_virtio_device",
+#endif
+                          &hvisor_misc_dev);
+        if (err)
+            goto err_out;
     }
-
-    virtio_irq = of_irq_get(node, 0);
-    err = request_irq(virtio_irq, virtio_irq_handler,
-                      IRQF_SHARED | IRQF_TRIGGER_RISING, "hvisor_virtio_device",
-                      &hvisor_misc_dev);
-    if (err)
-        goto err_out;
-
-    of_node_put(node);
 #else
     // we don't use device tree in x86_64, so we have to get IRQ using hypercall
     u32 *irq = kmalloc(sizeof(u32), GFP_KERNEL);
@@ -415,6 +759,9 @@ static int __init hvisor_init(void) {
 
     kfree(irq);
 #endif /* X86_64 */
+#ifdef LOONGARCH64
+init_done:
+#endif
     pr_info("hvisor init done!!!\n");
     return 0;
 err_out:
@@ -429,6 +776,13 @@ err_out:
 ** Module Exit function
 */
 static void __exit hvisor_exit(void) {
+#ifdef LOONGARCH64
+    if (hvisor_poll_thread) {
+        hrtimer_cancel(&hvisor_poll_timer);
+        kthread_stop(hvisor_poll_thread);
+        hvisor_poll_thread = NULL;
+    }
+#endif
     if (virtio_irq != -1)
         free_irq(virtio_irq, &hvisor_misc_dev);
     if (virtio_irq_ctx)

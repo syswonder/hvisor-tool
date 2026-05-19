@@ -131,8 +131,17 @@ struct VirtIODevice {
 
 // used event idx for driver telling device when to notify driver.
 #define VQ_USED_EVENT(vq) ((vq)->avail_ring->ring[(vq)->num])
-// avail event idx for device telling driver when to notify device.
-#define VQ_AVAIL_EVENT(vq) (*(uint16_t *)&(vq)->used_ring->ring[(vq)->num])
+
+// avail event idx: read/write via memcpy to avoid strict-aliasing violation.
+static inline uint16_t vq_avail_event_get(VirtQueue *vq) {
+    uint16_t val;
+    memcpy(&val, (const char *)&(vq)->used_ring->ring[(vq)->num], sizeof(val));
+    return val;
+}
+static inline void vq_avail_event_set(VirtQueue *vq, uint16_t val) {
+    memcpy((char *)&(vq)->used_ring->ring[(vq)->num], &val, sizeof(val));
+}
+#define VQ_AVAIL_EVENT(vq) vq_avail_event_get(vq)
 
 #define VIRT_MAGIC 0x74726976 /* 'virt' */
 
@@ -219,5 +228,9 @@ int virtio_start_from_json(char *json_path);
 int virtio_start(int argc, char *argv[]);
 
 void *read_file(const char *filename, uint64_t *filesize);
+
+// boneinscri 2026.04
+char *open_json_file(const char *json_config_path);
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #endif /* __HVISOR_VIRTIO_H */

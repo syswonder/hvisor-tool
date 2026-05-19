@@ -12,7 +12,7 @@ ifndef CROSS_COMPILE
 	else ifeq ($(ARCH), riscv)
 		CROSS_COMPILE := riscv64-unknown-linux-gnu-
 	else ifeq ($(ARCH), loongarch)
-		CROSS_COMPILE := loongarch64-unknown-linux-gnu-
+		CROSS_COMPILE :=  loongarch64-linux-gnu-
 	else ifeq ($(ARCH), x86_64)
 		CROSS_COMPILE := x86_64-linux-gnu-
 	endif

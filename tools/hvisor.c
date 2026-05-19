@@ -8,6 +8,7 @@
  * Authors:
  *      Guowei Li <2401213322@stu.pku.edu.cn>
  */
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -89,9 +90,36 @@ void *read_file(const char *filename, uint64_t *filesize) {
     return buf;
 }
 
+// boneinscri 2026.04
+char *open_json_file(const char *json_config_path) {
+    FILE *file = fopen(json_config_path, "r");
+    if (file == NULL) {
+        printf("Error opening json file: %s\n", json_config_path);
+        fprintf(stderr, "Error opening json file: %s\n", json_config_path);
+        exit(1);
+    }
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    char *buffer = malloc(file_size + 1);
+    if (fread(buffer, 1, file_size, file) == 0) {
+        printf("Error reading json file: %s\n", json_config_path);
+        fprintf(stderr, "Error reading json file: %s\n", json_config_path);
+        goto err_out;
+    }
+    fclose(file);
+    buffer[file_size] = '\0';
+
+    return buffer;
+err_out:
+    free(buffer);
+    return NULL;
+}
+
 int open_dev() {
     int fd = open("/dev/hvisor", O_RDWR);
     if (fd < 0) {
+        perror("open /dev/hvisor");
         log_error("Failed to open /dev/hvisor!");
         exit(1);
     }
@@ -126,7 +154,8 @@ static __u64 load_buffer_to_memory(const void *buf, __u64 size,
     return map_size;
 }
 
-static __u64 load_str_to_memory(const char *str, __u64 load_paddr) {
+static __attribute__((unused)) __u64 load_str_to_memory(const char *str,
+                                                        __u64 load_paddr) {
     /* Include trailing '\0' so guest side can safely parse cmdline. */
     __u64 size = strlen(str) + 1;
     return load_buffer_to_memory(str, size, load_paddr);
@@ -238,11 +267,13 @@ static int parse_modules(const cJSON *const modules_json) {
         goto err_out;                                                          \
     }
 
-static int parse_arch_config(cJSON *root, zone_config_t *config) {
+static __attribute__((unused)) int parse_arch_config(cJSON *root,
+                                                     zone_config_t *config) {
     cJSON *arch_config_json = SAFE_CJSON_GET_OBJECT_ITEM(root, "arch_config");
     CHECK_JSON_NULL(arch_config_json, "arch_config");
 
-    arch_zone_config_t *arch_config = &config->arch_config;
+    arch_zone_config_t *arch_config __attribute__((unused)) =
+        &config->arch_config;
 #ifdef ARM64
     cJSON *gic_version_json =
         SAFE_CJSON_GET_OBJECT_ITEM(arch_config_json, "gic_version");
@@ -639,6 +670,465 @@ err_out:
     return -1;
 }
 
+// boneinscri 2026.04
+#ifdef LOONGARCH64
+static __u64 load_chunked_image_to_memory(const char *path, __u64 load_ipa,
+                                          zone_config_t *config,
+                                          cJSON *ram_json) {
+
+    __u64 size, page_size, total_map_size;
+    int fd = open_dev();
+    void *image_content;
+
+    image_content = read_file(path, &size);
+    // printf("load_chunked_image_to_memory, read file done, image_content:
+    // %p\n",
+    //     image_content);
+
+    page_size = sysconf(_SC_PAGESIZE);
+    total_map_size = (size + page_size - 1) & ~(page_size - 1);
+    __u64 total_map_size_remain = total_map_size;
+
+    int num_memory_regions_ram = cJSON_GetArraySize(ram_json);
+    int num_memory_regions_init = config->num_memory_regions;
+
+    // update num_memory_regions
+    config->num_memory_regions += num_memory_regions_ram;
+    if (config->num_memory_regions > CONFIG_MAX_MEMORY_REGIONS) {
+        fprintf(stderr,
+                "Error: too many memory regions in config, "
+                "config->num_memory_regions: %d\n",
+                config->num_memory_regions);
+        while (1) {
+        };
+    } else {
+        printf("load_chunked_image_to_memory, num_memory_regions: %d\n",
+               config->num_memory_regions);
+    }
+
+    __u64 kernel_load_paddr_ipa =
+        config->kernel_load_paddr; // fake load address, update it later
+
+    // printf("load_chunked_image_to_memory, ready, total_map_size: %llx,
+    // kernel_load_paddr_ipa： %llx\n",
+    //     total_map_size, kernel_load_paddr_ipa);
+
+    int cross_load_addr_cnt = 0;
+
+    for (int i = 0; i < num_memory_regions_ram; i++) {
+        // printf("load_chunked_image_to_memory....., i: %d\n", i);
+
+        cJSON *region = cJSON_GetArrayItem(ram_json, i);
+        int config_region_idx = num_memory_regions_init + i;
+
+        memory_region_t *mem_region =
+            &config->memory_regions[config_region_idx];
+
+        // step1: update config->memory_regions
+        mem_region->virtual_start =
+            strtoull(cJSON_GetObjectItem(region, "ipa")->valuestring, NULL, 16);
+        mem_region->physical_start =
+            strtoull(cJSON_GetObjectItem(region, "hpa")->valuestring, NULL, 16);
+        mem_region->size = strtoull(
+            cJSON_GetObjectItem(region, "size")->valuestring, NULL, 16);
+
+        // patch
+        char *type_str = cJSON_GetObjectItem(region, "type")->valuestring;
+        if (type_str == NULL) {
+            printf(
+                "load_chunked_image_to_memory, type_str is null, check it\n");
+            while (1) {
+            }
+        }
+        if (strcmp(type_str, "virtio") == 0) {
+            // virtio, skip it
+            mem_region->type = MEM_TYPE_VIRTIO;
+            continue;
+        } else if (strcmp(type_str, "io") == 0) {
+            // special io, skip it (like shm-msg)
+            mem_region->type = MEM_TYPE_IO;
+            continue;
+        } else if (strcmp(type_str, "ram") == 0) {
+            // ram
+            mem_region->type = MEM_TYPE_RAM;
+        } else {
+            printf("load_chunked_image_to_memory, unknown memory type, check "
+                   "it, %s\n",
+                   type_str);
+            while (1) {
+            }
+        }
+
+        // step2: copy image to memory
+        __u64 load_chunk_size = mem_region->size;
+        __u64 load_chunk_hpa = mem_region->physical_start;
+        __u64 load_chunk_ipa = mem_region->virtual_start;
+        __u64 map_size_chunk =
+            (load_chunk_size + page_size - 1) & ~(page_size - 1);
+
+        // printf("load_chunk_ipa: 0x%llx, load_chunk_hpa: 0x%llx,
+        // load_chunk_size: 0x%llx\n",
+        //     load_chunk_ipa, load_chunk_hpa, load_chunk_size);
+        map_size_chunk =
+            MIN(map_size_chunk, total_map_size_remain); // important
+
+        // step2.5: update config->kernel_load_paddr
+        if (kernel_load_paddr_ipa >= load_chunk_ipa &&
+            kernel_load_paddr_ipa < load_chunk_ipa + load_chunk_size) {
+            __u64 offset = kernel_load_paddr_ipa - load_chunk_ipa;
+            config->kernel_load_paddr = load_chunk_hpa + offset;
+            // printf("config->kernel_load_paddr: 0x%llx\n",
+            // config->kernel_load_paddr);
+
+            cross_load_addr_cnt++;
+            if (cross_load_addr_cnt > 1) {
+                printf("load_chunked_image_to_memory, memory region doubled, "
+                       "check it\n");
+                while (1) {
+                }
+            }
+        }
+
+        if (total_map_size_remain == 0) {
+            // it's enough
+            continue;
+        }
+
+        if (load_chunk_ipa + load_chunk_size < kernel_load_paddr_ipa) {
+            // jump this chunk, because it's before kernel load address
+            while (1) {
+            }
+            printf("load_chunked_image_to_memory, jump this chunk, don't need "
+                   "memmove, load_chunk_ipa: 0x%llx, kernel_load_paddr_ipa: "
+                   "0x%llx\n",
+                   load_chunk_ipa, kernel_load_paddr_ipa);
+            continue;
+        } else {
+            if (load_chunk_ipa < kernel_load_paddr_ipa) {
+                // load_chunk_ipa ... |kernel_load_paddr_ipa| ... load_chunk_ipa
+                // + load_chunk_size
+
+                // this!!!
+                __u64 needless_size = kernel_load_paddr_ipa - load_chunk_ipa;
+                map_size_chunk -= needless_size;
+                load_chunk_hpa += needless_size;
+                load_chunk_ipa = kernel_load_paddr_ipa;
+            } else {
+                // do nothing
+            }
+        }
+
+        // printf(
+        //     "ready to mmap, map_size_chunk: 0x%llx, load_chunk_hpa: 0x%llx,
+        //     total_map_size_remain: %llx\n", map_size_chunk, load_chunk_hpa,
+        //     total_map_size_remain);
+
+        void *virt_addr_chunk = (__u64)mmap(
+            NULL, map_size_chunk, PROT_READ | PROT_WRITE | PROT_EXEC,
+            MAP_SHARED, fd, load_chunk_hpa); // use hvisor_mmap handler
+
+        if (virt_addr_chunk == MAP_FAILED) {
+            perror("load_chunked_image_to_memory, mapping memory error");
+            exit(1);
+        }
+
+        // if (load_chunk_ipa < kernel_load_paddr_ipa) {
+        //     fprintf(stderr, "Error: load_chunk_ipa 0x%llx is less than
+        //     load_paddr_ipa 0x%llx\n",
+        //         load_chunk_ipa, kernel_load_paddr_ipa);
+        //     exit(1);
+        // }
+        __u64 load_addr_offset = load_chunk_ipa - kernel_load_paddr_ipa;
+
+        // printf("ready to memove, virt_addr_chunk: 0x%p, "
+        //        "image_addr: 0x%p, load_addr_offset: 0x%llx\n",
+        //        virt_addr_chunk, image_content + load_addr_offset,
+        //        load_addr_offset);
+
+        memmove(virt_addr_chunk, image_content + load_addr_offset,
+                map_size_chunk); // this?
+
+        total_map_size_remain -= map_size_chunk;
+
+        // printf("virtual_addr_chunk: 0x%p, load_addr_offset: 0x%llx,
+        // load_chunk_ipa: 0x%llx, load_chunk_hpa: 0x%llx, load_chunk_size:
+        // 0x%llx, map_size_chunk: 0x%llx, total_map_size_remain: 0x%llx\n",
+        //         virt_addr_chunk, load_addr_offset, load_chunk_ipa,
+        //         load_chunk_hpa, load_chunk_size, map_size_chunk,
+        //         total_map_size_remain);
+
+        munmap(virt_addr_chunk, map_size_chunk);
+    }
+
+    if (total_map_size_remain != 0) {
+        printf("something error happened, total_map_size_remain: 0x%llx, "
+               "total_map_size: 0x%llx, check it\n",
+               total_map_size_remain, total_map_size);
+        exit(1);
+    }
+
+    assert(kernel_load_paddr_ipa != config->kernel_load_paddr);
+
+    free(image_content);
+
+    close(fd);
+
+    printf("load_chunked_image_to_memory, image_size : %llx\n", size);
+    return total_map_size;
+}
+#endif
+
+static int zone_start_from_json_dynamic(const char *json_config_path,
+                                        const char *ram_json_path,
+                                        zone_config_t *config) {
+    char *buffer_main = NULL;
+    char *buffer_ram = NULL;
+    cJSON *root_main = NULL;
+    cJSON *root_ram = NULL;
+
+    buffer_main = open_json_file(json_config_path);
+    if (buffer_main == NULL) {
+        goto err_out;
+    }
+    buffer_ram = open_json_file(ram_json_path);
+    if (buffer_ram == NULL) {
+        goto err_out;
+    }
+
+    // parse ram JSON
+    root_ram = cJSON_Parse(buffer_ram);
+    cJSON *ram_regions_json = cJSON_GetObjectItem(root_ram, "memory_regions");
+    CHECK_JSON_NULL_ERR_OUT(ram_regions_json, "memory_regions")
+
+    // parse JSON
+    root_main = cJSON_Parse(buffer_main);
+    cJSON *zone_id_json = cJSON_GetObjectItem(root_main, "zone_id");
+    cJSON *cpus_json = cJSON_GetObjectItem(root_main, "cpus");
+    cJSON *name_json = cJSON_GetObjectItem(root_main, "name");
+    cJSON *boot_method_json = cJSON_GetObjectItem(root_main, "boot_method");
+    cJSON *memory_regions_json =
+        cJSON_GetObjectItem(root_main, "memory_regions");
+    cJSON *kernel_filepath_json =
+        cJSON_GetObjectItem(root_main, "kernel_filepath");
+    cJSON *kernel_args_json = cJSON_GetObjectItem(root_main, "kernel_args");
+    cJSON *dtb_filepath_json = cJSON_GetObjectItem(root_main, "dtb_filepath");
+    cJSON *kernel_load_paddr_json =
+        cJSON_GetObjectItem(root_main, "kernel_load_paddr");
+    cJSON *dtb_load_paddr_json =
+        cJSON_GetObjectItem(root_main, "dtb_load_paddr");
+    cJSON *entry_point_json = cJSON_GetObjectItem(root_main, "entry_point");
+    cJSON *interrupts_json = cJSON_GetObjectItem(root_main, "interrupts");
+    cJSON *ivc_configs_json = cJSON_GetObjectItem(root_main, "ivc_configs");
+
+    CHECK_JSON_NULL_ERR_OUT(zone_id_json, "zone_id")
+    CHECK_JSON_NULL_ERR_OUT(cpus_json, "cpus")
+    CHECK_JSON_NULL_ERR_OUT(name_json, "name")
+    CHECK_JSON_NULL_ERR_OUT(boot_method_json, "boot_method")
+    CHECK_JSON_NULL_ERR_OUT(memory_regions_json, "memory_regions")
+    CHECK_JSON_NULL_ERR_OUT(kernel_filepath_json, "kernel_filepath")
+    CHECK_JSON_NULL_ERR_OUT(kernel_args_json, "kernel_args")
+    CHECK_JSON_NULL_ERR_OUT(dtb_filepath_json, "dtb_filepath")
+    CHECK_JSON_NULL_ERR_OUT(kernel_load_paddr_json, "kernel_load_paddr")
+    CHECK_JSON_NULL_ERR_OUT(dtb_load_paddr_json, "dtb_load_paddr")
+    CHECK_JSON_NULL_ERR_OUT(entry_point_json, "entry_point")
+    CHECK_JSON_NULL_ERR_OUT(interrupts_json, "interrupts")
+    CHECK_JSON_NULL_ERR_OUT(ivc_configs_json, "ivc_configs")
+
+    config->zone_id = zone_id_json->valueint;
+
+    int num_cpus = cJSON_GetArraySize(cpus_json);
+
+    for (int i = 0; i < num_cpus; i++) {
+        config->cpus |= (1 << cJSON_GetArrayItem(cpus_json, i)->valueint);
+    }
+
+    int num_memory_regions = cJSON_GetArraySize(memory_regions_json);
+    int num_interrupts = cJSON_GetArraySize(interrupts_json);
+
+    if (num_memory_regions > CONFIG_MAX_MEMORY_REGIONS ||
+        num_interrupts > CONFIG_MAX_INTERRUPTS) {
+        log_error("Exceeded maximum allowed regions/interrupts.");
+        goto err_out;
+    }
+
+    // Iterate through each memory region of the zone
+    // Including memory and MMIO regions of the zone
+    config->num_memory_regions = num_memory_regions;
+    for (int i = 0; i < num_memory_regions; i++) {
+        cJSON *region = cJSON_GetArrayItem(memory_regions_json, i);
+        memory_region_t *mem_region = &config->memory_regions[i];
+
+        const char *type_str = cJSON_GetObjectItem(region, "type")->valuestring;
+        if (strcmp(type_str, "ram") == 0) {
+            // do ram region parsing below
+            // continue;
+            mem_region->type = MEM_TYPE_RAM;
+        } else if (strcmp(type_str, "io") == 0) {
+            // io device
+            mem_region->type = MEM_TYPE_IO;
+        } else if (strcmp(type_str, "virtio") == 0) {
+            // virtio device
+            mem_region->type = MEM_TYPE_VIRTIO;
+        } else {
+            printf("Unknown memory region type: %s\n", type_str);
+            mem_region->type = -1; // invalid type
+        }
+
+        mem_region->physical_start =
+            strtoull(cJSON_GetObjectItem(region, "physical_start")->valuestring,
+                     NULL, 16);
+        mem_region->virtual_start =
+            strtoull(cJSON_GetObjectItem(region, "virtual_start")->valuestring,
+                     NULL, 16);
+
+        mem_region->size = strtoull(
+            cJSON_GetObjectItem(region, "size")->valuestring, NULL, 16);
+    }
+
+    printf("memory regions, get done\n");
+
+    memset(config->interrupts_bitmap, 0, sizeof(config->interrupts_bitmap));
+    for (int i = 0; i < num_interrupts; i++) {
+        const cJSON *const item = SAFE_CJSON_GET_ARRAY_ITEM(interrupts_json, i);
+
+        size_t irq;
+        if (parse_json_size(item, &irq) != 0) {
+            log_error("Failed to parse irq %d", i);
+            goto err_out;
+        }
+
+        if (irq >= CONFIG_MAX_INTERRUPTS) {
+            log_error("irq %zu is out of range", irq);
+            goto err_out;
+        }
+
+        // irq is valid, set the bit in the bitmap
+        const size_t word_index = irq / CONFIG_INTERRUPTS_BITMAP_BITS_PER_WORD;
+        const size_t bit_index = irq % CONFIG_INTERRUPTS_BITMAP_BITS_PER_WORD;
+        config->interrupts_bitmap[word_index] |= ((BitmapWord)1) << bit_index;
+        log_info("irq %zu is valid, set the bit in the bitmap", irq);
+    }
+    printf("interrupts, get done\n");
+
+    // ivc
+    int num_ivc_configs = cJSON_GetArraySize(ivc_configs_json);
+    config->num_ivc_configs = num_ivc_configs;
+    for (int i = 0; i < num_ivc_configs; i++) {
+        cJSON *ivc_config_json = cJSON_GetArrayItem(ivc_configs_json, i);
+        ivc_config_t *ivc_config = &config->ivc_configs[i];
+        ivc_config->ivc_id =
+            cJSON_GetObjectItem(ivc_config_json, "ivc_id")->valueint;
+        ivc_config->peer_id =
+            cJSON_GetObjectItem(ivc_config_json, "peer_id")->valueint;
+        ivc_config->shared_mem_ipa = strtoull(
+            cJSON_GetObjectItem(ivc_config_json, "shared_mem_ipa")->valuestring,
+            NULL, 16);
+        ivc_config->control_table_ipa =
+            strtoull(cJSON_GetObjectItem(ivc_config_json, "control_table_ipa")
+                         ->valuestring,
+                     NULL, 16);
+        ivc_config->rw_sec_size = strtoull(
+            cJSON_GetObjectItem(ivc_config_json, "rw_sec_size")->valuestring,
+            NULL, 16);
+        ivc_config->out_sec_size = strtoull(
+            cJSON_GetObjectItem(ivc_config_json, "out_sec_size")->valuestring,
+            NULL, 16);
+        ivc_config->interrupt_num =
+            cJSON_GetObjectItem(ivc_config_json, "interrupt_num")->valueint;
+        ivc_config->max_peers =
+            cJSON_GetObjectItem(ivc_config_json, "max_peers")->valueint;
+        printf("ivc_config %d: ivc_id %d, peer_id %d, shared_mem_ipa %llx, "
+               "interrupt_num %d, max_peers %d\n",
+               i, ivc_config->ivc_id, ivc_config->peer_id,
+               ivc_config->shared_mem_ipa, ivc_config->interrupt_num,
+               ivc_config->max_peers);
+    }
+    config->entry_point = strtoull(entry_point_json->valuestring, NULL, 16);
+
+    config->kernel_load_paddr =
+        strtoull(kernel_load_paddr_json->valuestring, NULL, 16);
+    // TODO: modify to real physical addr according to the memory region later
+
+    config->dtb_load_paddr =
+        strtoull(dtb_load_paddr_json->valuestring, NULL, 16);
+
+    printf("ready to call load_chunked_image_to_memory\n");
+    config->kernel_size = load_chunked_image_to_memory(
+        kernel_filepath_json->valuestring, config->kernel_load_paddr, config,
+        ram_regions_json);
+
+    if (config->kernel_load_paddr == 0) {
+        printf("kernel load paddr is 0, check it\n");
+        while (1)
+            ;
+    }
+
+    int fd = open_dev();
+    if (fd < 0) {
+        perror("zone_start: open hvisor failed");
+        goto err_out;
+    }
+    int err = 0;
+#ifdef LOONGARCH64
+    if (!strcmp(boot_method_json->valuestring, "acpi")) {
+        // get cmdline
+
+    } else {
+        // assert it is normal boot method
+    }
+#endif
+
+    printf("kernel_load_paddr: 0x%llx\n", config->kernel_load_paddr);
+
+    printf("Kernel size: %llx, DTB size: %llx\n", config->kernel_size,
+           config->dtb_size);
+
+    // check name length
+    if (strlen(name_json->valuestring) > CONFIG_NAME_MAXLEN) {
+        fprintf(stderr, "Zone name too long: %s\n", name_json->valuestring);
+        goto err_out;
+    }
+    strncpy(config->name, name_json->valuestring, CONFIG_NAME_MAXLEN);
+
+    printf("Zone name: %s\n", config->name);
+
+#ifndef LOONGARCH64
+    // Parse architecture-specific configurations (interrupts for each platform)
+    if (parse_arch_config(root_main, config))
+        goto err_out;
+#endif
+    parse_pci_config(root_main, config);
+
+    if (root_main)
+        cJSON_Delete(root_main);
+    if (buffer_main)
+        free(buffer_main);
+
+    if (root_ram)
+        cJSON_Delete(root_ram);
+    if (buffer_ram)
+        free(buffer_ram);
+
+    err = ioctl(fd, HVISOR_ZONE_START, config);
+
+    if (err)
+        perror("zone_start: ioctl failed");
+
+    close(fd);
+
+    return 0;
+err_out:
+    if (root_main)
+        cJSON_Delete(root_main);
+    if (buffer_main)
+        free(buffer_main);
+    if (root_ram)
+        cJSON_Delete(root_ram);
+    if (buffer_ram)
+        free(buffer_ram);
+    return -1;
+}
+
 static int zone_start_from_json(const char *json_config_path,
                                 zone_config_t *config) {
     cJSON *root = NULL;
@@ -940,6 +1430,44 @@ static int zone_start(int argc, char *argv[]) {
     return zone_start_from_json(json_config_path, &config);
 }
 
+// ./hvisor zone start_dyna <path_to_config_file> <path_to_ram_json>
+static int zone_start_dyna(int argc, char *argv[]) {
+    char *json_config_path = NULL;
+    char *ram_json_path = NULL;
+    zone_config_t config;
+    int fd, ret;
+    uint64_t hvisor_config_version;
+
+    if (argc != 5) {
+        help(1);
+    }
+    json_config_path = argv[3];
+    ram_json_path = argv[4];
+
+    memset(&config, 0, sizeof(zone_config_t));
+
+    fd = open_dev();
+    ret = ioctl(fd, HVISOR_CONFIG_CHECK, &hvisor_config_version);
+    close(fd);
+
+    if (ret) {
+        log_error("ioctl: hvisor config check failed, ret %d", ret);
+        return -1;
+    }
+
+    if (hvisor_config_version != CONFIG_MAGIC_VERSION) {
+        log_error("zone start_dyna failed because config versions mismatch, "
+                  "hvisor-tool is 0x%x, hvisor is 0x%x",
+                  CONFIG_MAGIC_VERSION, hvisor_config_version);
+        return -1;
+    } else {
+        log_info("zone config check pass");
+    }
+
+    return zone_start_from_json_dynamic(json_config_path, ram_json_path,
+                                        &config);
+}
+
 // ./hvisor zone shutdown -id 1
 static int zone_shutdown(int argc, char *argv[]) {
     if (argc != 2 || strcmp(argv[0], "-id") != 0) {
@@ -959,7 +1487,7 @@ static void print_cpu_list(__u64 cpu_mask, char *outbuf, size_t bufsize) {
     int found_cpu = 0;
     char *buf = outbuf;
 
-    for (int i = 0; i < MAX_CPUS && buf - outbuf < bufsize; i++) {
+    for (int i = 0; i < MAX_CPUS && (size_t)(buf - outbuf) < bufsize; i++) {
         if ((cpu_mask & (1ULL << i)) != 0) {
             if (found_cpu) {
                 *buf++ = ',';
@@ -976,22 +1504,25 @@ static void print_cpu_list(__u64 cpu_mask, char *outbuf, size_t bufsize) {
 }
 
 // ./hvisor zone list
-static int zone_list(int argc, char *argv[]) {
+static int zone_list(int argc, char *argv[] __attribute__((unused))) {
+
     if (argc != 0) {
         help(1);
     }
     __u64 cnt = CONFIG_MAX_ZONES;
     zone_info_t *zones = malloc(sizeof(zone_info_t) * cnt);
     zone_list_args_t args = {cnt, zones};
-    // printf("zone_list: cnt %llu, zones %p\n", cnt, zones);
+    printf("zone_list: cnt %llu, zones %p\n", cnt, zones);
     int fd = open_dev();
+    printf("zone_list, step1\n");
     int ret = ioctl(fd, HVISOR_ZONE_LIST, &args);
+    printf("[trace] zone_list: ret = %d\n", ret);
+
     if (ret < 0)
         perror("zone_list: ioctl failed");
 
     printf("| %11s     | %10s        | %9s       | %10s |\n", "zone_id", "cpus",
            "name", "status");
-
     for (int i = 0; i < ret; i++) {
         char cpu_list_str[256]; // Assuming this buffer size is enough
         memset(cpu_list_str, 0, sizeof(cpu_list_str));
@@ -1021,6 +1552,8 @@ int main(int argc, char *argv[]) {
 
         if (strcmp(argv[2], "start") == 0) {
             err = zone_start(argc, argv);
+        } else if (strcmp(argv[2], "start_dyna") == 0) {
+            err = zone_start_dyna(argc, argv);
         } else if (strcmp(argv[2], "shutdown") == 0) {
             err = zone_shutdown(argc - 3, &argv[3]);
         } else if (strcmp(argv[2], "list") == 0) {

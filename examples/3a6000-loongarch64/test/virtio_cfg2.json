@@ -1,0 +1,15 @@
+{
+    "zones": [
+        {
+            "id": 1,
+            "name" : "npucore",
+            "memory_region": [
+                {
+                    "type": "normal",
+                    "zonex_ipa": "0x80000000",
+                    "size": "0x2f000000"
+                }
+            ]
+        }
+   ]
+}
