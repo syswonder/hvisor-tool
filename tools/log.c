@@ -52,11 +52,11 @@ static struct {
     bool quiet;
 } L;
 
-static const char *level_strings[] = {"TRACE", "DEBUG", "INFO",
-                                      "WARN",  "ERROR", "FATAL"};
+static const char *level_strings[] = {"DEBUG", "INFO", "WARN", "ERROR",
+                                      "FATAL"};
 
-static const int syslog_levels[] = {LOG_DEBUG,   LOG_DEBUG, LOG_INFO,
-                                    LOG_WARNING, LOG_ERR,   LOG_CRIT};
+static const int syslog_levels[] = {LOG_DEBUG, LOG_INFO, LOG_WARNING, LOG_ERR,
+                                    LOG_CRIT};
 
 const char *log_level_string(int level) { return level_strings[level]; }
 
