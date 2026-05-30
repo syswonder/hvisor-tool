@@ -14,7 +14,6 @@
 #include <linux/virtio_blk.h>
 #include <pthread.h>
 #include <stdint.h>
-#include <sys/queue.h>
 
 /// Maximum number of segments in a request.
 #define BLK_SEG_MAX 512
@@ -33,7 +32,6 @@ typedef struct virtio_blk_outhdr BlkReqHead;
 
 // A request needed to process by blk thread.
 struct blkp_req {
-    TAILQ_ENTRY(blkp_req) link;
     struct iovec *iov;
     int iovcnt;
     uint64_t offset;
@@ -48,11 +46,11 @@ typedef struct virtio_blk_dev {
     pthread_t tid;
     pthread_mutex_t mtx;
     pthread_cond_t cond;
-    TAILQ_HEAD(, blkp_req) procq;
     int close;
 } BlkDev;
 
 BlkDev *init_blk_dev(VirtIODevice *vdev);
+void start_blk_worker(VirtIODevice *vdev);
 int virtio_blk_init(VirtIODevice *vdev, const char *img_path);
 int virtio_blk_notify_handler(VirtIODevice *vdev, VirtQueue *vq);
 void virtio_blk_close(VirtIODevice *vdev);

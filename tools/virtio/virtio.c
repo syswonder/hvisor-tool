@@ -195,6 +195,8 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
         init_virtio_queue(vdev, dev_type);
         log_info("debug: init_blk_dev and init_virtio_queue finished\n");
         is_err = virtio_blk_init(vdev, (const char *)arg0);
+        if (!is_err)
+            start_blk_worker(vdev);
         break;
 
     case VirtioTNet:
