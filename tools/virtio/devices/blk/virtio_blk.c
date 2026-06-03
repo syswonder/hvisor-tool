@@ -128,6 +128,7 @@ BlkDev *init_blk_dev(VirtIODevice *vdev) {
     dev->config.capacity = -1;
     dev->config.size_max = -1;
     dev->config.seg_max = BLK_SEG_MAX;
+    dev->config.blk_size = SECTOR_BSIZE;
     dev->img_fd = -1;
     dev->close = 0;
     // TODO: chang to thread poll
