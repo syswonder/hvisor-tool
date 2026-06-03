@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <limits.h>
+#include <net/if.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -24,12 +25,13 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/signalfd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/uio.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
-#include <net/if.h>
 
 #include "hvisor.h"
 #include "json_parse.h"
@@ -49,8 +51,26 @@ static int epoll_fd = -1;
 volatile struct virtio_bridge *virtio_bridge;
 
 pthread_mutex_t RES_MUTEX = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t VDEV_MUTEX = PTHREAD_MUTEX_INITIALIZER;
 VirtIODevice *vdevs[MAX_DEVS];
 int vdevs_num;
+
+#define VIRTIO_CTRL_SOCKET_PATH "/run/hvisor-virtio.sock"
+#define VIRTIO_CTRL_OP_ADD "add"
+#define VIRTIO_CTRL_MSG_LEN 256
+
+typedef struct virtio_control_request {
+    char op[16];
+    char json_path[PATH_MAX];
+} VirtioControlRequest;
+
+typedef struct virtio_control_response {
+    int status;
+    char message[VIRTIO_CTRL_MSG_LEN];
+} VirtioControlResponse;
+
+static int ctrl_fd = -1;
+static pthread_t ctrl_tid;
 
 // the index of `zone_mem[i]`
 #define VIRT_ADDR 0
@@ -267,19 +287,24 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
 
         goto err;
 
+    pthread_mutex_lock(&VDEV_MUTEX);
+
     // If reaches max number of virtual devices
     if (vdevs_num == MAX_DEVS) {
         log_error("virtio device num exceed max limit");
+        pthread_mutex_unlock(&VDEV_MUTEX);
         goto err;
     }
 
     if (vdev->dev == NULL) {
         log_error("failed to init dev");
+        pthread_mutex_unlock(&VDEV_MUTEX);
         goto err;
     }
 
     log_info("create %s success", virtio_device_type_to_string(dev_type));
     vdevs[vdevs_num++] = vdev;
+    pthread_mutex_unlock(&VDEV_MUTEX);
 
     return vdev;
 
@@ -996,8 +1021,10 @@ void virtio_finish_cfg_req(uint32_t target_cpu, uint64_t value) {
 int virtio_handle_req(volatile struct device_req *req) {
     int i;
     uint64_t value = 0;
+    VirtIODevice *vdev = NULL;
 
     // Check if the request corresponds to a virtio device in a specific zone
+    pthread_mutex_lock(&VDEV_MUTEX);
     for (i = 0; i < vdevs_num; ++i) {
         if ((req->src_zone == vdevs[i]->zone_id) &&
             in_range(req->address, vdevs[i]->base_addr,
@@ -1006,6 +1033,7 @@ int virtio_handle_req(volatile struct device_req *req) {
     }
 
     if (i == vdevs_num) {
+        pthread_mutex_unlock(&VDEV_MUTEX);
         log_warn("no matched virtio dev in zone %d, address is 0x%x",
                  req->src_zone, req->address);
         value = virtio_mmio_read(NULL, 0, 0);
@@ -1013,7 +1041,8 @@ int virtio_handle_req(volatile struct device_req *req) {
         return -1;
     }
 
-    VirtIODevice *vdev = vdevs[i];
+    vdev = vdevs[i];
+    pthread_mutex_unlock(&VDEV_MUTEX);
 
     uint64_t offs = req->address - vdev->base_addr;
 
@@ -1056,6 +1085,12 @@ void virtio_close() {
     if (epoll_fd >= 0) {
         close(epoll_fd);
         epoll_fd = -1;
+    }
+
+    if (ctrl_fd >= 0) {
+        close(ctrl_fd);
+        ctrl_fd = -1;
+        unlink(VIRTIO_CTRL_SOCKET_PATH);
     }
 
     munmap((void *)virtio_bridge, MMAP_SIZE);
@@ -1528,8 +1563,11 @@ static int parse_virtio_memory_region_config(cJSON *mem_region,
 static int parse_virtio_zone_config(cJSON *zone_json, VirtioZoneConfig *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
-    if (parse_json_u32(SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "id"),
-                       &cfg->zone_id) != 0) {
+    cJSON *zone_id_json = SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "id");
+    if (!zone_id_json) {
+        zone_id_json = SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "zone_id");
+    }
+    if (parse_json_u32(zone_id_json, &cfg->zone_id) != 0) {
         log_error("failed to parse zone id");
         return -1;
     }
@@ -1578,6 +1616,11 @@ static int parse_virtio_config(cJSON *root, VirtioConfig *cfg) {
     memset(cfg, 0, sizeof(*cfg));
 
     cJSON *zones_json = SAFE_CJSON_GET_OBJECT_ITEM(root, "zones");
+    if (!zones_json) {
+        cfg->zone_num = 1;
+        return parse_virtio_zone_config(root, &cfg->zones[0]);
+    }
+
     size_t num_zones = SAFE_CJSON_GET_ARRAY_SIZE(zones_json);
     if (num_zones > MAX_ZONES) {
         log_error("Exceed maximum zone number");
@@ -1627,6 +1670,18 @@ static int mmap_virtio_zone_memory(const VirtioZoneConfig *cfg) {
     return 0;
 }
 
+static void publish_virtio_mmio_addrs(void) {
+    pthread_mutex_lock(&VDEV_MUTEX);
+    for (int i = 0; i < vdevs_num; i++) {
+        virtio_bridge->mmio_addrs[i] = vdevs[i]->base_addr;
+    }
+    pthread_mutex_unlock(&VDEV_MUTEX);
+
+    write_barrier();
+    virtio_bridge->mmio_avail = 1;
+    write_barrier();
+}
+
 static int create_virtio_zone_devices(const VirtioZoneConfig *cfg) {
     for (size_t i = 0; i < cfg->device_num; i++) {
         if (create_virtio_device_from_config(&cfg->devices[i]) != 0) {
@@ -1636,6 +1691,40 @@ static int create_virtio_zone_devices(const VirtioZoneConfig *cfg) {
     }
 
     return 0;
+}
+
+static ssize_t read_full(int fd, void *buf, size_t len) {
+    size_t off = 0;
+
+    while (off < len) {
+        ssize_t ret = read(fd, (char *)buf + off, len - off);
+        if (ret == 0)
+            return off;
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        off += ret;
+    }
+
+    return off;
+}
+
+static ssize_t write_full(int fd, const void *buf, size_t len) {
+    size_t off = 0;
+
+    while (off < len) {
+        ssize_t ret = write(fd, (const char *)buf + off, len - off);
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        off += ret;
+    }
+
+    return off;
 }
 
 int virtio_start_from_json(char *json_path) {
@@ -1672,8 +1761,122 @@ err_out:
     return err;
 }
 
+static int virtio_add_from_json(const char *json_path) {
+    int err = virtio_start_from_json((char *)json_path);
+    if (err)
+        return err;
+
+    publish_virtio_mmio_addrs();
+    return 0;
+}
+
+static void fill_control_response(VirtioControlResponse *resp, int status,
+                                  const char *message) {
+    memset(resp, 0, sizeof(*resp));
+    resp->status = status;
+    snprintf(resp->message, sizeof(resp->message), "%s", message);
+}
+
+static void handle_control_client(int client_fd) {
+    VirtioControlRequest req;
+    VirtioControlResponse resp;
+
+    memset(&req, 0, sizeof(req));
+    if (read_full(client_fd, &req, sizeof(req)) != sizeof(req)) {
+        fill_control_response(&resp, -1,
+                              "failed to read virtio control request");
+        write_full(client_fd, &resp, sizeof(resp));
+        return;
+    }
+
+    req.op[sizeof(req.op) - 1] = '\0';
+    req.json_path[sizeof(req.json_path) - 1] = '\0';
+
+    if (strcmp(req.op, VIRTIO_CTRL_OP_ADD) != 0) {
+        fill_control_response(&resp, -1,
+                              "unsupported virtio control operation");
+    } else if (virtio_add_from_json(req.json_path) != 0) {
+        fill_control_response(&resp, -1, "virtio add failed");
+    } else {
+        fill_control_response(&resp, 0, "virtio add succeeded");
+    }
+
+    write_full(client_fd, &resp, sizeof(resp));
+}
+
+static void *virtio_control_loop(void *arg) {
+    (void)arg;
+
+    for (;;) {
+        int client_fd = accept(ctrl_fd, NULL, NULL);
+        if (client_fd < 0) {
+            if (errno == EINTR)
+                continue;
+            if (ctrl_fd < 0)
+                break;
+            log_error("accept virtio control client failed, errno is %d",
+                      errno);
+            continue;
+        }
+
+        handle_control_client(client_fd);
+        close(client_fd);
+    }
+
+    return NULL;
+}
+
+static int start_virtio_control_server(void) {
+    struct sockaddr_un addr;
+
+    mkdir("/run", 0755);
+    unlink(VIRTIO_CTRL_SOCKET_PATH);
+
+    ctrl_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (ctrl_fd < 0) {
+        log_error("create virtio control socket failed, errno is %d", errno);
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
+             VIRTIO_CTRL_SOCKET_PATH);
+
+    if (bind(ctrl_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        log_error("bind virtio control socket failed, errno is %d", errno);
+        close(ctrl_fd);
+        ctrl_fd = -1;
+        return -1;
+    }
+
+    if (listen(ctrl_fd, 8) != 0) {
+        log_error("listen virtio control socket failed, errno is %d", errno);
+        close(ctrl_fd);
+        ctrl_fd = -1;
+        unlink(VIRTIO_CTRL_SOCKET_PATH);
+        return -1;
+    }
+
+    if (pthread_create(&ctrl_tid, NULL, virtio_control_loop, NULL) != 0) {
+        log_error("create virtio control thread failed");
+        close(ctrl_fd);
+        ctrl_fd = -1;
+        unlink(VIRTIO_CTRL_SOCKET_PATH);
+        return -1;
+    }
+
+    pthread_detach(ctrl_tid);
+    return 0;
+}
+
 int virtio_start(int argc, char *argv[]) {
-    int opt, err = 0;
+    int err = 0;
+    if (argc < 4) {
+        log_error("usage: hvisor virtio start <virtio.json>");
+        return -1;
+    }
+
     err = virtio_init(); // Initialize virtio dependencies
     if (err)
         return -1;
@@ -1683,17 +1886,66 @@ int virtio_start(int argc, char *argv[]) {
     if (err)
         goto err_out;
 
-    for (int i = 0; i < vdevs_num; i++) {
-        virtio_bridge->mmio_addrs[i] = vdevs[i]->base_addr;
+    if (start_virtio_control_server() != 0) {
+        err = -1;
+        goto err_out;
     }
 
-    write_barrier();
-    virtio_bridge->mmio_avail = 1;
-    write_barrier();
+    publish_virtio_mmio_addrs();
 
     handle_virtio_requests(); // Handle virtio requests
     return 0;
 err_out:
     virtio_close();
     return err;
+}
+
+int virtio_add(int argc, char *argv[]) {
+    VirtioControlRequest req;
+    VirtioControlResponse resp;
+    struct sockaddr_un addr;
+    char resolved_path[PATH_MAX];
+    int fd;
+
+    if (argc < 4) {
+        log_error("usage: hvisor virtio add <virtio.json>");
+        return -1;
+    }
+
+    if (!realpath(argv[3], resolved_path)) {
+        log_error("failed to resolve virtio config path %s", argv[3]);
+        return -1;
+    }
+
+    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        log_error("create virtio add client socket failed, errno is %d", errno);
+        return -1;
+    }
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s",
+             VIRTIO_CTRL_SOCKET_PATH);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        log_error("connect virtio daemon failed, errno is %d", errno);
+        close(fd);
+        return -1;
+    }
+
+    memset(&req, 0, sizeof(req));
+    snprintf(req.op, sizeof(req.op), "%s", VIRTIO_CTRL_OP_ADD);
+    snprintf(req.json_path, sizeof(req.json_path), "%s", resolved_path);
+
+    if (write_full(fd, &req, sizeof(req)) != sizeof(req) ||
+        read_full(fd, &resp, sizeof(resp)) != sizeof(resp)) {
+        log_error("virtio add control request failed");
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    printf("%s\n", resp.message);
+    return resp.status;
 }
