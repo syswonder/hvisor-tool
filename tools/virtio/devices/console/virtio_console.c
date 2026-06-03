@@ -188,24 +188,9 @@ static void virtq_tx_handle_one_request(ConsoleDev *dev, VirtQueue *vq) {
         return;
     }
 
-    // Convert \n -> \r\n for proper terminal output.
-    // PTY master doesn't do ONLCR; we handle it here.
-    for (int i = 0; i < n; i++) {
-        char *p = iov[i].iov_base;
-        size_t remain = iov[i].iov_len;
-        char *start = p;
-        char *nl;
-        while (remain > 0 && (nl = memchr(start, '\n', remain)) != NULL) {
-            size_t pre = nl - start;
-            if (pre > 0)
-                write(dev->master_fd, start, pre);
-            write(dev->master_fd, "\r\n", 2);
-            start = nl + 1;
-            remain -= pre + 1;
-        }
-        if (remain > 0)
-            write(dev->master_fd, start, remain);
-    }
+    // Write data directly. The guest OS is responsible for \r\n conversion
+    // (e.g. ONLCR in its console driver). This keeps the hypervisor layer thin.
+    writev(dev->master_fd, iov, n);
 
     update_used_ring(vq, idx, 0);
     free(iov);

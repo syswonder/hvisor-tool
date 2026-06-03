@@ -413,8 +413,7 @@ void virtqueue_set_desc_table(VirtQueue *vq) {
     int zone_id = vq->dev->zone_id;
     log_debug("zone %d set dev %s desc table ipa at %#x", zone_id,
               virtio_device_type_to_string(vq->dev->type), vq->desc_table_addr);
-    void *addr = get_virt_addr(
-        (void *)(uintptr_t)vq->desc_table_addr, zone_id);
+    void *addr = get_virt_addr((void *)(uintptr_t)vq->desc_table_addr, zone_id);
     if (addr == NULL) {
         log_error("virtqueue_set_desc_table: failed to translate GPA %#lx",
                   vq->desc_table_addr);
@@ -666,8 +665,9 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
     if (offset >= VIRTIO_MMIO_CONFIG) {
         offset -= VIRTIO_MMIO_CONFIG;
         if (vdev->dev == NULL) {
-            log_error("virtio-mmio-read: vdev->dev is NULL for config offset %#x",
-                      offset);
+            log_error(
+                "virtio-mmio-read: vdev->dev is NULL for config offset %#x",
+                offset);
             return 0;
         }
         log_debug("read virtio dev config");
