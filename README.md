@@ -112,6 +112,23 @@ nohup ./hvisor virtio start virtio_cfg.json &
 ./hvisor zone start <vm_config.json>
 ```
 
+The daemon also supports adding Virtio devices after it has started. A later
+configuration can be sent to the running daemon with:
+
+```bash
+./hvisor virtio add virtio_zone2.json
+./hvisor zone start zone2_linux.json
+```
+
+`virtio start` creates a local Unix domain socket at
+`/run/hvisor-virtio.sock`. `virtio add` connects to that socket and asks the
+running daemon to parse the new Virtio configuration, map the zone memory if it
+has not been mapped yet, and publish the enabled devices. Existing full
+`virtio_cfg.json` files with a top-level `zones` array are still supported.
+For MMIO Virtio devices, run `virtio add` before starting the zone that will use
+those devices, so the zone configuration can still register the corresponding
+Virtio MMIO regions with hvisor.
+
 The `&` part indicates that this command will run in the background. Since the Virtio daemon uses `syslog` for logging, use the following commands to view the `hvisor-tool` logs:
 
 *   **For systems with `systemd`:**
@@ -153,4 +170,4 @@ To shut down the Virtio daemon and all the created devices, execute the followin
 
 ```
 pkill hvisor-virtio
-``` 
+```
