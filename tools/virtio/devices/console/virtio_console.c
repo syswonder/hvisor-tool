@@ -18,6 +18,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <termios.h>
 
@@ -96,12 +97,17 @@ int virtio_console_init(VirtIODevice *vdev) {
     master_fd = posix_openpt(O_RDWR | O_NOCTTY);
     if (master_fd < 0) {
         log_error("Failed to open master pty, errno is %d", errno);
+        return -1;
     }
     if (grantpt(master_fd) < 0) {
         log_error("Failed to grant pty, errno is %d", errno);
+        close(master_fd);
+        return -1;
     }
     if (unlockpt(master_fd) < 0) {
         log_error("Failed to unlock pty, errno is %d", errno);
+        close(master_fd);
+        return -1;
     }
     dev->master_fd = master_fd;
 
@@ -124,6 +130,7 @@ int virtio_console_init(VirtIODevice *vdev) {
     // from echoing the characters sent from the master back to the master.
     tcgetattr(slave_fd, &term_io);
     cfmakeraw(&term_io);
+    term_io.c_oflag |= ONLCR;
     tcsetattr(slave_fd, TCSAFLUSH, &term_io);
     dev->slave_keepalive_fd = slave_fd;
 
@@ -169,7 +176,6 @@ int virtio_console_rxq_notify_handler(VirtIODevice *vdev, VirtQueue *vq) {
 static void virtq_tx_handle_one_request(ConsoleDev *dev, VirtQueue *vq) {
     int n;
     uint16_t idx;
-    ssize_t len;
     struct iovec *iov = NULL;
     if (dev->master_fd <= 0) {
         log_error("Console master fd is not ready");
@@ -182,10 +188,10 @@ static void virtq_tx_handle_one_request(ConsoleDev *dev, VirtQueue *vq) {
         return;
     }
 
-    len = writev(dev->master_fd, iov, n);
-    if (len < 0) {
-        log_error("Failed to write to console, errno is %d", errno);
-    }
+    // Write data directly. The guest OS is responsible for \r\n conversion
+    // (e.g. ONLCR in its console driver). This keeps the hypervisor layer thin.
+    writev(dev->master_fd, iov, n);
+
     update_used_ring(vq, idx, 0);
     free(iov);
 }

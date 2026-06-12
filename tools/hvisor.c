@@ -31,6 +31,21 @@
 #include "virtio.h"
 #include "zone_config.h"
 
+// Multiboot2 constants
+#define MULTIBOOT2_MAGIC 0x36D76289
+#define MULTIBOOT_TAG_TYPE_END 0
+#define MULTIBOOT_TAG_TYPE_CMDLINE 1
+#define MULTIBOOT_TAG_TYPE_BOOT_LOADER_NAME 2
+#define MULTIBOOT_TAG_TYPE_MODULE 3
+#define MULTIBOOT_TAG_TYPE_BASIC_MEMINFO 4
+#define MULTIBOOT_TAG_TYPE_MEMORY_MAP 6
+#define MULTIBOOT_TAG_TYPE_FRAMEBUFFER 8
+
+#define MULTIBOOT_FLAG_MEMORY (1 << 0)
+#define MULTIBOOT_FLAG_BOOTDEV (1 << 2)
+#define MULTIBOOT_FLAG_CMDLINE (1 << 3)
+#define MULTIBOOT_FLAG_MMAP (1 << 6)
+
 static void __attribute__((noreturn)) help(int exit_status) {
     printf("Hypervisor Management Tool\n\n");
     printf("Usage:\n");
@@ -140,10 +155,464 @@ static __u64 load_image_to_memory(const char *path, __u64 load_paddr) {
     __u64 map_size;
     void *image_content;
 
+    log_info("[MULTIBOOT] Loading image from: %s to paddr: 0x%llx", path,
+             load_paddr);
+
     image_content = read_file(path, (uint64_t *)&size);
     map_size = load_buffer_to_memory(image_content, size, load_paddr);
+
+    log_info("[MULTIBOOT] Image loaded, size: %llu, mapped: %llu", size,
+             map_size);
+
     free(image_content);
     return map_size;
+}
+
+/**
+ * @brief Build Multiboot2 info structure
+ *
+ * This function builds a basic Multiboot2 info structure in memory
+ * that Asterinas can use to boot.
+ *
+ * Multiboot2 structure:
+ * - offset 0: total_size (uint32_t) - total size of info structure
+ * - offset 4: reserved (uint32_t) - must be 0
+ * - offset 8: tags...
+ * - last: end tag (type=0, size=8)
+ *
+ * @param total_mem_size Total memory size in bytes
+ * @param cmdline Kernel command line string
+ * @return Pointer to allocated Multiboot info, or NULL on error
+ */
+// Multiboot2 memory map entry types
+#define MULTIBOOT_MEMORY_AVAILABLE 1
+#define MULTIBOOT_MEMORY_RESERVED 2
+
+// Multiboot2 memory map entry
+struct multiboot_mmap_entry {
+    uint64_t addr;
+    uint64_t len;
+    uint32_t type;
+    uint32_t zero;
+};
+
+// Multiboot2 memory map tag header
+struct multiboot_tag_mmap {
+    uint32_t type;
+    uint32_t size;
+    uint32_t entry_size;
+    uint32_t entry_version;
+    struct multiboot_mmap_entry entries[];
+};
+
+static void *build_multiboot2_info(uint64_t total_mem_size, const char *cmdline,
+                                   memory_region_t *mem_regions,
+                                   int num_regions, uint64_t initramfs_gpa,
+                                   uint64_t initramfs_size,
+                                   const char *module_cmdline) {
+    int has_initramfs = (initramfs_size > 0);
+
+    // Calculate needed size for memory map tag
+    int num_ram_regions = 0;
+    for (int i = 0; i < num_regions; i++) {
+        if (mem_regions[i].type == MEM_TYPE_RAM) {
+            num_ram_regions++;
+        }
+    }
+
+    size_t mmap_tag_size =
+        sizeof(struct multiboot_tag_mmap) +
+        num_ram_regions * sizeof(struct multiboot_mmap_entry);
+
+    // Calculate module tag size (if initramfs is provided)
+    size_t module_tag_size = 0;
+    if (has_initramfs) {
+        size_t cmdline_len = module_cmdline ? strlen(module_cmdline) + 1 : 1;
+        module_tag_size =
+            8 + 8 +
+            ((cmdline_len + 7) &
+             ~7); // header(8) + mod_start/mod_end(8) + padded cmdline
+    }
+
+    // Allocate buffer for Multiboot info
+    size_t info_size = 4096 + mmap_tag_size + module_tag_size;
+    void *info = malloc(info_size);
+
+    if (!info) {
+        log_error("[MULTIBOOT] Failed to allocate memory for Multiboot info");
+        return NULL;
+    }
+
+    memset(info, 0, info_size);
+    log_info("[MULTIBOOT] Allocated Multiboot info buffer at %p", info);
+
+    // Build tags - start at offset 8 (after total_size and reserved)
+    char *tag_ptr = (char *)info + 8;
+
+    // Memory info tag (required by Asterinas)
+    {
+        uint32_t *tag_type = (uint32_t *)tag_ptr;
+        uint32_t *tag_size_field = (uint32_t *)(tag_ptr + 4);
+        uint32_t *mem_lower = (uint32_t *)(tag_ptr + 8);
+        uint32_t *mem_upper = (uint32_t *)(tag_ptr + 12);
+
+        *tag_type = MULTIBOOT_TAG_TYPE_BASIC_MEMINFO;
+        *tag_size_field = 16;
+        *mem_lower = 640; // 640KB low memory
+        *mem_upper = (total_mem_size > 0x100000)
+                         ? (total_mem_size / 1024 - 1024)
+                         : 0; // KB above 1MB
+
+        log_info(
+            "[MULTIBOOT] Added basic meminfo tag: lower=%u KB, upper=%u KB",
+            *mem_lower, *mem_upper);
+        tag_ptr += 16;
+    }
+
+    // Memory map tag (CRITICAL for Asterinas memory allocator)
+    // For x86_64, we need to split memory to leave MMIO space below 4GB:
+    // - Low memory: 0x0 - 0xC0000000 (3GB)
+    // - MMIO space: 0xC0000000 - 0x100000000 (1GB, reserved for devices)
+    // - High memory: 0x100000000+ (4GB+)
+    {
+        struct multiboot_tag_mmap *mmap_tag =
+            (struct multiboot_tag_mmap *)tag_ptr;
+        mmap_tag->type = MULTIBOOT_TAG_TYPE_MEMORY_MAP;
+        mmap_tag->entry_size = sizeof(struct multiboot_mmap_entry);
+        mmap_tag->entry_version = 0;
+
+        int entry_idx = 0;
+        const uint64_t LOW_MMIO_TOP = 0x100000000ULL; // 4GB
+        const uint64_t LOW_MEM_TOP = 0xC0000000ULL; // 3GB - leave 1GB for MMIO
+
+        for (int i = 0; i < num_regions; i++) {
+            if (mem_regions[i].type == MEM_TYPE_RAM) {
+                uint64_t region_start = mem_regions[i].virtual_start;
+                uint64_t region_size = mem_regions[i].size;
+                uint64_t region_end = region_start + region_size;
+
+                // Split into low and high memory regions
+                if (region_start < LOW_MEM_TOP) {
+                    // Low memory region (below 3GB)
+                    uint64_t low_start = region_start;
+                    uint64_t low_end =
+                        (region_end < LOW_MEM_TOP) ? region_end : LOW_MEM_TOP;
+                    uint64_t low_size = low_end - low_start;
+
+                    if (low_size > 0) {
+                        mmap_tag->entries[entry_idx].addr = low_start;
+                        mmap_tag->entries[entry_idx].len = low_size;
+                        mmap_tag->entries[entry_idx].type =
+                            MULTIBOOT_MEMORY_AVAILABLE;
+                        mmap_tag->entries[entry_idx].zero = 0;
+                        log_info("[MULTIBOOT] Memory map entry %d: addr=0x%llx "
+                                 "(GPA), len=0x%llx, type=AVAILABLE (low)",
+                                 entry_idx, low_start, low_size);
+                        entry_idx++;
+                    }
+                }
+
+                // High memory region (above 4GB)
+                if (region_end > LOW_MMIO_TOP) {
+                    uint64_t high_start = (region_start > LOW_MMIO_TOP)
+                                              ? region_start
+                                              : LOW_MMIO_TOP;
+                    uint64_t high_size = region_end - high_start;
+
+                    if (high_size > 0) {
+                        mmap_tag->entries[entry_idx].addr = high_start;
+                        mmap_tag->entries[entry_idx].len = high_size;
+                        mmap_tag->entries[entry_idx].type =
+                            MULTIBOOT_MEMORY_AVAILABLE;
+                        mmap_tag->entries[entry_idx].zero = 0;
+                        log_info("[MULTIBOOT] Memory map entry %d: addr=0x%llx "
+                                 "(GPA), len=0x%llx, type=AVAILABLE (high)",
+                                 entry_idx, high_start, high_size);
+                        entry_idx++;
+                    }
+                }
+            }
+        }
+
+        mmap_tag->size = sizeof(struct multiboot_tag_mmap) +
+                         entry_idx * sizeof(struct multiboot_mmap_entry);
+
+        log_info("[MULTIBOOT] Added memory map tag: %d entries, size=%u bytes",
+                 entry_idx, mmap_tag->size);
+
+        // Align to 8 bytes
+        size_t aligned_size = (mmap_tag->size + 7) & ~7;
+        tag_ptr += aligned_size;
+    }
+
+    // Command line tag
+    if (cmdline && strlen(cmdline) > 0) {
+        size_t cmdline_len = strlen(cmdline) + 1;
+        size_t tag_size = 8 + ((cmdline_len + 7) & ~7); // Align to 8 bytes
+
+        uint32_t *tag_type = (uint32_t *)tag_ptr;
+        uint32_t *tag_size_field = (uint32_t *)(tag_ptr + 4);
+        char *tag_data = tag_ptr + 8;
+
+        *tag_type = MULTIBOOT_TAG_TYPE_CMDLINE;
+        *tag_size_field = tag_size;
+        strncpy(tag_data, cmdline, cmdline_len);
+
+        log_info("[MULTIBOOT] Added cmdline tag: '%s' (size: %zu)", cmdline,
+                 tag_size);
+
+        tag_ptr += tag_size;
+    }
+
+    // Module tag (initramfs) - must come before End tag
+    if (has_initramfs) {
+        const char *mod_cmd = module_cmdline ? module_cmdline : "";
+        size_t mod_cmd_len = strlen(mod_cmd) + 1;
+        size_t mod_tag_size = 8 + 8 + ((mod_cmd_len + 7) & ~7);
+
+        uint32_t *mod_type = (uint32_t *)tag_ptr;
+        uint32_t *mod_size = (uint32_t *)(tag_ptr + 4);
+        uint32_t *mod_start = (uint32_t *)(tag_ptr + 8);
+        uint32_t *mod_end = (uint32_t *)(tag_ptr + 12);
+
+        *mod_type = MULTIBOOT_TAG_TYPE_MODULE;
+        *mod_size = mod_tag_size;
+        *mod_start = (uint32_t)(initramfs_gpa & 0xFFFFFFFF);
+        *mod_end = (uint32_t)((initramfs_gpa + initramfs_size) & 0xFFFFFFFF);
+
+        // Copy cmdline after the fixed fields
+        char *mod_cmd_dst = tag_ptr + 16;
+        memcpy(mod_cmd_dst, mod_cmd, mod_cmd_len);
+
+        log_info("[MULTIBOOT] Added initramfs module tag: start=0x%llx, "
+                 "end=0x%llx, cmd='%s'",
+                 (unsigned long long)initramfs_gpa,
+                 (unsigned long long)(initramfs_gpa + initramfs_size), mod_cmd);
+
+        tag_ptr += mod_tag_size;
+    }
+
+    // End tag
+    uint32_t *end_type = (uint32_t *)tag_ptr;
+    uint32_t *end_size = (uint32_t *)(tag_ptr + 4);
+    *end_type = MULTIBOOT_TAG_TYPE_END;
+    *end_size = 8;
+    tag_ptr += 8;
+
+    // Now set the total_size at the beginning
+    uint32_t total_size = (uint32_t)(tag_ptr - (char *)info);
+    uint32_t *total_size_ptr = (uint32_t *)info;
+    *total_size_ptr = total_size;
+
+    // Reserved field is already 0 from memset
+
+    log_info("[MULTIBOOT] Multiboot2 info built: total_size=%u bytes",
+             total_size);
+
+    return info;
+}
+
+/**
+ * @brief Find ELF entry point from ELF file
+ *
+ * @param elf_path Path to ELF file
+ * @param entry_point Output: entry point address
+ * @return 0 on success, -1 on error
+ */
+static int find_elf_entry_point(const char *elf_path, uint64_t *entry_point) {
+    uint64_t size;
+    void *elf = read_file(elf_path, &size);
+
+    if (!elf) {
+        log_error("[MULTIBOOT] Failed to read ELF file: %s", elf_path);
+        return -1;
+    }
+
+    log_info("[MULTIBOOT] Reading ELF file: %s, size: %llu", elf_path, size);
+
+    // Check ELF magic
+    unsigned char *e_ident = (unsigned char *)elf;
+    if (e_ident[0] != 0x7f || e_ident[1] != 'E' || e_ident[2] != 'L' ||
+        e_ident[3] != 'F') {
+        log_error("[MULTIBOOT] Not a valid ELF file: %s", elf_path);
+        free(elf);
+        return -1;
+    }
+
+    log_info("[MULTIBOOT] ELF file is valid");
+
+    // Check ELF class (64-bit)
+    if (e_ident[4] != 2) {
+        log_error("[MULTIBOOT] Not a 64-bit ELF file");
+        free(elf);
+        return -1;
+    }
+
+    // Get entry point from ELF header
+    // ELF header entry point is at offset 24 (8 bytes)
+    uint64_t *entry_ptr = (uint64_t *)((char *)elf + 24);
+    *entry_point = *entry_ptr;
+
+    log_info("[MULTIBOOT] ELF entry point: 0x%llx", *entry_point);
+
+    free(elf);
+    return 0;
+}
+
+/**
+ * @brief Load ELF segments to correct physical addresses with GPA-to-HPA
+ * translation
+ *
+ * This function parses the ELF file and loads each PT_LOAD segment
+ * to its specified physical address (p_paddr) plus an offset.
+ *
+ * @param elf_path Path to ELF file
+ * @param total_size Output: total size of loaded segments (max p_paddr +
+ * p_memsz)
+ * @param gpa_to_hpa_offset Offset to add to p_paddr for GPA-to-HPA translation
+ * @return 0 on success, -1 on error
+ */
+static int load_elf_segments(const char *elf_path, uint64_t *total_size,
+                             int64_t gpa_to_hpa_offset) {
+    fprintf(stderr,
+            "[ELF] load_elf_segments called with path: %s, "
+            "gpa_to_hpa_offset=0x%llx\n",
+            elf_path, (unsigned long long)gpa_to_hpa_offset);
+    fflush(stderr);
+
+    uint64_t file_size;
+    void *elf = read_file(elf_path, &file_size);
+
+    fprintf(stderr, "[ELF] read_file returned, file_size=%llu\n", file_size);
+    fflush(stderr);
+
+    if (!elf) {
+        fprintf(stderr, "[ELF] Failed to read ELF file: %s\n", elf_path);
+        return -1;
+    }
+
+    fprintf(stderr, "[ELF] Loading ELF segments from: %s, file size: %llu\n",
+            elf_path, file_size);
+
+    // Check ELF magic
+    unsigned char *e_ident = (unsigned char *)elf;
+    if (e_ident[0] != 0x7f || e_ident[1] != 'E' || e_ident[2] != 'L' ||
+        e_ident[3] != 'F') {
+        fprintf(stderr, "[ELF] Not a valid ELF file\n");
+        free(elf);
+        return -1;
+    }
+
+    // Check 64-bit
+    if (e_ident[4] != 2) {
+        fprintf(stderr, "[ELF] Not a 64-bit ELF file\n");
+        free(elf);
+        return -1;
+    }
+
+    // Parse ELF64 header
+    // e_phoff: program header table file offset (offset 32, 8 bytes)
+    // e_phentsize: program header entry size (offset 54, 2 bytes)
+    // e_phnum: number of program headers (offset 56, 2 bytes)
+    uint64_t e_phoff = *(uint64_t *)((char *)elf + 32);
+    uint16_t e_phentsize = *(uint16_t *)((char *)elf + 54);
+    uint16_t e_phnum = *(uint16_t *)((char *)elf + 56);
+
+    fprintf(stderr,
+            "[ELF] Program headers: offset=0x%llx, entry_size=%u, count=%u\n",
+            e_phoff, e_phentsize, e_phnum);
+
+    *total_size = 0;
+
+    // Process each program header
+    for (int i = 0; i < e_phnum; i++) {
+        char *phdr = (char *)elf + e_phoff + i * e_phentsize;
+
+        // Parse program header (ELF64)
+        // p_type: offset 0, 4 bytes (PT_LOAD = 1)
+        // p_flags: offset 4, 4 bytes
+        // p_offset: offset 8, 8 bytes
+        // p_vaddr: offset 16, 8 bytes
+        // p_paddr: offset 24, 8 bytes
+        // p_filesz: offset 32, 8 bytes
+        // p_memsz: offset 40, 8 bytes
+        uint32_t p_type = *(uint32_t *)(phdr + 0);
+        uint64_t p_offset =
+            *(uint64_t *)((char *)elf + e_phoff + i * e_phentsize + 8);
+        uint64_t p_paddr =
+            *(uint64_t *)((char *)elf + e_phoff + i * e_phentsize + 24);
+        uint64_t p_filesz =
+            *(uint64_t *)((char *)elf + e_phoff + i * e_phentsize + 32);
+        uint64_t p_memsz =
+            *(uint64_t *)((char *)elf + e_phoff + i * e_phentsize + 40);
+
+        fprintf(stderr,
+                "[ELF] Segment %d: type=%u, p_offset=0x%llx, "
+                "p_paddr(GPA)=0x%llx, p_filesz=0x%llx\n",
+                i, p_type, p_offset, p_paddr, p_filesz);
+
+        // Only process PT_LOAD segments
+        if (p_type != 1) { // PT_LOAD
+            fprintf(stderr, "[ELF] Segment %d: skipping (not PT_LOAD)\n", i);
+            continue;
+        }
+
+        // Check bounds
+        if (p_offset + p_filesz > file_size) {
+            fprintf(stderr,
+                    "[ELF] Segment %d file offset+size exceeds file size\n", i);
+            free(elf);
+            return -1;
+        }
+
+        // Calculate actual load address (HPA) by applying GPA-to-HPA offset
+        uint64_t load_paddr = (uint64_t)((int64_t)p_paddr + gpa_to_hpa_offset);
+
+        // Load segment content to physical memory
+        if (p_filesz > 0) {
+            fprintf(stderr,
+                    "[ELF] Loading segment %d to HPA 0x%llx (GPA 0x%llx), size "
+                    "0x%llx\n",
+                    i, load_paddr, p_paddr, p_filesz);
+            // load_buffer_to_memory exits on failure, so we don't need to check
+            // return value
+            load_buffer_to_memory((char *)elf + p_offset, p_filesz, load_paddr);
+            fprintf(stderr, "[ELF] Segment %d loaded successfully\n", i);
+        }
+
+        // Handle p_memsz > p_filesz: zero-fill the remaining memory
+        // This is crucial for BSS sections and stack areas
+        if (p_memsz > p_filesz) {
+            uint64_t zero_fill_start = load_paddr + p_filesz;
+            uint64_t zero_fill_size = p_memsz - p_filesz;
+            fprintf(stderr,
+                    "[ELF] Zero-filling segment %d: HPA 0x%llx, size 0x%llx "
+                    "(BSS/stack)\n",
+                    i, zero_fill_start, zero_fill_size);
+            // Allocate a zero buffer and load it
+            void *zero_buf = calloc(1, zero_fill_size);
+            if (!zero_buf) {
+                fprintf(stderr,
+                        "[ELF] Failed to allocate zero buffer for segment %d\n",
+                        i);
+                free(elf);
+                return -1;
+            }
+            load_buffer_to_memory(zero_buf, zero_fill_size, zero_fill_start);
+            free(zero_buf);
+            fprintf(stderr, "[ELF] Segment %d zero-fill completed\n", i);
+        }
+
+        // Track total size (for information)
+        if (p_paddr + p_memsz > *total_size) {
+            *total_size = p_paddr + p_memsz;
+        }
+    }
+
+    free(elf);
+    fprintf(stderr, "[ELF] All segments loaded, total GPA range: 0x%llx\n",
+            *total_size);
+    return 0;
 }
 
 /**
@@ -238,7 +707,8 @@ static int parse_modules(const cJSON *const modules_json) {
         goto err_out;                                                          \
     }
 
-static int parse_arch_config(cJSON *root, zone_config_t *config) {
+static int parse_arch_config(cJSON *root, zone_config_t *config,
+                              int64_t gpa_to_hpa_offset) {
     cJSON *arch_config_json = SAFE_CJSON_GET_OBJECT_ITEM(root, "arch_config");
     CHECK_JSON_NULL(arch_config_json, "arch_config");
 
@@ -414,8 +884,9 @@ static int parse_arch_config(cJSON *root, zone_config_t *config) {
             0 ||
         parse_json_linux_u64(ioapic_size_json, &arch_config->ioapic_size) !=
             0 ||
-        parse_json_linux_u64(kernel_entry_gpa_json,
-                             &arch_config->kernel_entry_gpa) != 0) {
+        (config->arch_config.multiboot_enabled ? 0 :
+         parse_json_linux_u64(kernel_entry_gpa_json,
+                              &arch_config->kernel_entry_gpa)) != 0) {
         log_error("Failed to parse ioapic or kernel_entry_gpa\n");
         return -1;
     }
@@ -426,10 +897,8 @@ static int parse_arch_config(cJSON *root, zone_config_t *config) {
             log_error("Failed to parse boot_load_paddr\n");
             return -1;
         }
-        __u64 size = load_image_to_memory(boot_filepath_json->valuestring,
-                                          boot_load_paddr);
-
-        log_info("boot size: %llu", size);
+        __u64 boot_load_hpa = (__u64)((int64_t)boot_load_paddr + gpa_to_hpa_offset);
+        load_image_to_memory(boot_filepath_json->valuestring, boot_load_hpa);
     }
 
     if (setup_filepath_json != NULL) {
@@ -847,10 +1316,62 @@ static int zone_start_from_json(const char *json_config_path,
                   "dtb_load_paddr\n");
         goto err_out;
     }
+    // MULTIBOOT SUPPORT: Check for Multiboot mode first
+    cJSON *multiboot_json = cJSON_GetObjectItem(root, "multiboot_enabled");
+    if (multiboot_json != NULL && cJSON_IsBool(multiboot_json)) {
+        config->arch_config.multiboot_enabled =
+            cJSON_IsTrue(multiboot_json) ? 1 : 0;
+    } else {
+        config->arch_config.multiboot_enabled = 0; // Default: disabled
+    }
+
+    // Calculate GPA-to-HPA offset from first memory region
+    // This is used to translate ELF p_paddr (GPA) to actual load address (HPA)
+    int64_t gpa_to_hpa_offset = 0;
+    if (config->arch_config.multiboot_enabled && num_memory_regions > 0) {
+        // Use first RAM region for offset calculation
+        for (int i = 0; i < num_memory_regions; i++) {
+            memory_region_t *mem_region = &config->memory_regions[i];
+            if (mem_region->type == MEM_TYPE_RAM) {
+                gpa_to_hpa_offset = (int64_t)mem_region->physical_start -
+                                    (int64_t)mem_region->virtual_start;
+                fprintf(stderr,
+                        "[MULTIBOOT] GPA-to-HPA offset: 0x%llx (HPA=0x%llx, "
+                        "GPA=0x%llx)\n",
+                        (long long)gpa_to_hpa_offset,
+                        (long long)mem_region->physical_start,
+                        (long long)mem_region->virtual_start);
+                break;
+            }
+        }
+    }
 
     // Load kernel image to memory
-    config->kernel_size = load_image_to_memory(
-        kernel_filepath_json->valuestring, config->kernel_load_paddr);
+    if (config->arch_config.multiboot_enabled) {
+        // For Multiboot/ELF kernels, properly load each ELF segment
+        fprintf(stderr,
+                "[MULTIBOOT] Loading ELF segments for Multiboot kernel\n");
+        fprintf(stderr, "[MULTIBOOT] Kernel path: %s\n",
+                kernel_filepath_json->valuestring);
+        fflush(stderr);
+        uint64_t total_size = 0;
+        int ret = load_elf_segments(kernel_filepath_json->valuestring,
+                                    &total_size, gpa_to_hpa_offset);
+        fprintf(
+            stderr,
+            "[MULTIBOOT] load_elf_segments returned: %d, total_size: 0x%llx\n",
+            ret, total_size);
+        fflush(stderr);
+        if (ret != 0) {
+            log_error("Failed to load ELF segments for Multiboot kernel\n");
+            goto err_out;
+        }
+        config->kernel_size = total_size;
+    } else {
+        // Non-Multiboot: load entire image to kernel_load_paddr
+        config->kernel_size = load_image_to_memory(
+            kernel_filepath_json->valuestring, config->kernel_load_paddr);
+    }
 
 // Load dtb to memory
 // x86_64 uses ACPI
@@ -861,6 +1382,129 @@ static int zone_start_from_json(const char *json_config_path,
 
     log_info("Kernel size: %llu, DTB size: %llu", config->kernel_size,
              config->dtb_size);
+
+    // ============================================================
+    // MULTIBOOT SUPPORT: Build Multiboot2 info for Asterinas
+    // ============================================================
+    fprintf(stderr, "[MULTIBOOT] ====== Starting Multiboot2 support ======\n");
+
+    fprintf(stderr, "[MULTIBOOT] multiboot_enabled = %u\n",
+            config->arch_config.multiboot_enabled);
+
+    if (config->arch_config.multiboot_enabled) {
+        fprintf(stderr, "[MULTIBOOT] Multiboot mode enabled!\n");
+
+        // Get kernel command line
+        cJSON *kcmdline_json = cJSON_GetObjectItem(root, "kernel_cmdline");
+        const char *cmdline = "";
+        if (kcmdline_json != NULL && kcmdline_json->valuestring != NULL) {
+            cmdline = kcmdline_json->valuestring;
+        }
+        fprintf(stderr, "[MULTIBOOT] Kernel cmdline: '%s'\n", cmdline);
+
+        // Get Multiboot info address from JSON (or use default)
+        // This is the GPA where guest expects multiboot info
+        cJSON *mb_info_paddr_json =
+            cJSON_GetObjectItem(root, "multiboot_info_paddr");
+        uint64_t mb_info_gpa = 0x9000000; // Default GPA
+        if (mb_info_paddr_json != NULL) {
+            parse_json_linux_u64(mb_info_paddr_json, &mb_info_gpa);
+        }
+        // Calculate actual HPA for loading
+        uint64_t mb_info_hpa =
+            (uint64_t)((int64_t)mb_info_gpa + gpa_to_hpa_offset);
+        // Store GPA in config (guest will see this address)
+        config->arch_config.multiboot_info_paddr = mb_info_gpa;
+        fprintf(stderr, "[MULTIBOOT] Multiboot info: GPA=0x%llx, HPA=0x%llx\n",
+                mb_info_gpa, mb_info_hpa);
+
+        // Find ELF entry point from kernel ELF
+        uint64_t elf_entry = 0;
+        if (find_elf_entry_point(kernel_filepath_json->valuestring,
+                                 &elf_entry) == 0) {
+            fprintf(stderr, "[MULTIBOOT] Found ELF entry point (GPA): 0x%llx\n",
+                    elf_entry);
+            // Bootloader jumps to kernel entry; store it in kernel_entry_gpa
+            config->arch_config.kernel_entry_gpa = elf_entry;
+            fprintf(stderr, "[MULTIBOOT] kernel_entry_gpa set to: 0x%llx\n",
+                    elf_entry);
+        } else {
+            log_error("[MULTIBOOT] Failed to find ELF entry point!");
+            goto err_out;
+        }
+
+        // Load initramfs for Multiboot2 (if specified)
+        uint64_t initramfs_gpa = 0;
+        uint64_t initramfs_size = 0;
+        const char *initramfs_cmdline = "";
+        cJSON *initramfs_filepath_json =
+            cJSON_GetObjectItem(root, "initramfs_filepath");
+        cJSON *initramfs_load_gpa_json =
+            cJSON_GetObjectItem(root, "initramfs_load_gpa");
+        if (initramfs_filepath_json != NULL &&
+            initramfs_load_gpa_json != NULL &&
+            initramfs_filepath_json->valuestring != NULL &&
+            strcmp(initramfs_filepath_json->valuestring, "null") != 0) {
+            parse_json_linux_u64(initramfs_load_gpa_json, &initramfs_gpa);
+            uint64_t initramfs_hpa =
+                (uint64_t)((int64_t)initramfs_gpa + gpa_to_hpa_offset);
+            fprintf(stderr,
+                    "[MULTIBOOT] Loading initramfs: %s to GPA=0x%llx "
+                    "(HPA=0x%llx)\n",
+                    initramfs_filepath_json->valuestring, initramfs_gpa,
+                    initramfs_hpa);
+            initramfs_size = load_image_to_memory(
+                initramfs_filepath_json->valuestring, initramfs_hpa);
+            fprintf(stderr, "[MULTIBOOT] Initramfs loaded: size=0x%llx\n",
+                    initramfs_size);
+            initramfs_cmdline = initramfs_filepath_json->valuestring;
+        } else {
+            fprintf(stderr, "[MULTIBOOT] No initramfs configured\n");
+        }
+
+        // Build Multiboot2 info structure
+        // Calculate total memory from memory regions
+        uint64_t total_mem = 0;
+        for (int i = 0; i < num_memory_regions; i++) {
+            memory_region_t *mem_region = &config->memory_regions[i];
+            if (mem_region->type == MEM_TYPE_RAM) {
+                total_mem += mem_region->size;
+                fprintf(stderr, "[MULTIBOOT] Memory region %d: size 0x%llx\n",
+                        i, mem_region->size);
+            }
+        }
+        fprintf(stderr, "[MULTIBOOT] Total RAM: 0x%llx bytes\n", total_mem);
+
+        void *mb_info = build_multiboot2_info(
+            total_mem, cmdline, config->memory_regions, num_memory_regions,
+            initramfs_gpa, initramfs_size, initramfs_cmdline);
+        if (!mb_info) {
+            log_error("[MULTIBOOT] Failed to build Multiboot2 info!");
+            goto err_out;
+        }
+
+        fprintf(stderr,
+                "[MULTIBOOT] Loading Multiboot2 info to HPA: 0x%llx (GPA: "
+                "0x%llx)\n",
+                mb_info_hpa, mb_info_gpa);
+
+        // Load Multiboot info to memory at HPA (use larger size to accommodate
+        // tags)
+        uint64_t mb_info_size = 8192; // 8KB - enough for module tags
+        load_buffer_to_memory(mb_info, mb_info_size, mb_info_hpa);
+
+        // Free the allocated buffer
+        free(mb_info);
+
+        fprintf(stderr, "[MULTIBOOT] Multiboot2 info loaded successfully!\n");
+        fprintf(stderr, "[MULTIBOOT] ====== Multiboot2 support ready ======\n");
+    } else {
+        fprintf(stderr,
+                "[MULTIBOOT] Multiboot disabled, using default boot mode\n");
+    }
+    // ============================================================
+    // END MULTIBOOT SUPPORT
+    // ============================================================
 
     // modules configuration is optional, return -1 if failed, otherwise 0
     if (parse_modules(modules_json)) {
@@ -878,7 +1522,7 @@ static int zone_start_from_json(const char *json_config_path,
 
 #ifndef LOONGARCH64
     // Parse architecture-specific configurations (interrupts for each platform)
-    if (parse_arch_config(root, config))
+    if (parse_arch_config(root, config, gpa_to_hpa_offset))
         goto err_out;
 
 #endif
@@ -1016,6 +1660,14 @@ static int zone_list(int argc, char *argv[]) {
 }
 
 int main(int argc, char *argv[]) {
+    // Direct debug output to stderr to ensure we see it
+    for (int i = 0; i < argc; i++) {
+    }
+
+    // Set log level to INFO to see all logs
+    log_set_level(LOG_INFO);
+    log_set_quiet(false);
+
     int err = 0;
 
     multithread_log_init();

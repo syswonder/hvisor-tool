@@ -147,12 +147,12 @@ out:
 
 static int hvisor_zone_start(zone_config_t __user *arg) {
     int err = 0;
-    int i = 0;
 
     zone_config_t *zone_config = kmalloc(sizeof(zone_config_t), GFP_KERNEL);
 
     if (zone_config == NULL) {
         pr_err("hvisor.ko: failed to allocate memory for zone_config\n");
+        return -ENOMEM;
     }
 
     if (copy_from_user(zone_config, arg, sizeof(zone_config_t))) {
