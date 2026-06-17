@@ -25,6 +25,11 @@ static uint8_t trashbuf[1024];
 
 ConsoleDev *init_console_dev() {
     ConsoleDev *dev = (ConsoleDev *)malloc(sizeof(ConsoleDev));
+    if (!dev) {
+        log_error("failed to allocate console device");
+        return NULL;
+    }
+
     dev->config.cols = 80;
     dev->config.rows = 25;
     dev->master_fd = -1;
@@ -96,18 +101,26 @@ int virtio_console_init(VirtIODevice *vdev) {
     master_fd = posix_openpt(O_RDWR | O_NOCTTY);
     if (master_fd < 0) {
         log_error("Failed to open master pty, errno is %d", errno);
+        return -1;
     }
     if (grantpt(master_fd) < 0) {
         log_error("Failed to grant pty, errno is %d", errno);
+        close(master_fd);
+        return -1;
     }
     if (unlockpt(master_fd) < 0) {
         log_error("Failed to unlock pty, errno is %d", errno);
+        close(master_fd);
+        return -1;
     }
     dev->master_fd = master_fd;
 
     slave_name = ptsname(master_fd);
     if (slave_name == NULL) {
         log_error("Failed to get slave name, errno is %d", errno);
+        close(master_fd);
+        dev->master_fd = -1;
+        return -1;
     }
     log_info("char device redirected to %s", slave_name);
     // Open and keep a slave fd in this process. Without a slave peer,
@@ -143,7 +156,7 @@ int virtio_console_init(VirtIODevice *vdev) {
 
     if (dev->event == NULL) {
         log_error("Can't register console event");
-        close(master_fd);
+        close(dev->master_fd);
         if (dev->slave_keepalive_fd >= 0) {
             close(dev->slave_keepalive_fd);
             dev->slave_keepalive_fd = -1;
@@ -204,13 +217,23 @@ int virtio_console_txq_notify_handler(VirtIODevice *vdev, VirtQueue *vq) {
 }
 
 void virtio_console_close(VirtIODevice *vdev) {
+    if (!vdev)
+        return;
+
     ConsoleDev *dev = vdev->dev;
-    close(dev->master_fd);
-    if (dev->slave_keepalive_fd >= 0) {
-        close(dev->slave_keepalive_fd);
+    if (dev) {
+        if (dev->event) {
+            remove_event(dev->event);
+            dev->event = NULL;
+        }
+        if (dev->master_fd >= 0)
+            close(dev->master_fd);
+        dev->master_fd = -1;
+        if (dev->slave_keepalive_fd >= 0)
+            close(dev->slave_keepalive_fd);
+        dev->slave_keepalive_fd = -1;
+        free(dev);
     }
-    free(dev->event);
-    free(dev);
     free(vdev->vqs);
     free(vdev);
 }

@@ -89,6 +89,27 @@ struct hvisor_event *add_event(int fd, int epoll_type,
     }
 }
 
+void remove_event(struct hvisor_event *hevent) {
+    if (!hevent)
+        return;
+
+    pthread_mutex_lock(&events_lock);
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, hevent->fd, NULL);
+    for (int i = 0; i < events_num; i++) {
+        if (events[i] != hevent)
+            continue;
+
+        for (int j = i; j < events_num - 1; j++)
+            events[j] = events[j + 1];
+        events[events_num - 1] = NULL;
+        events_num--;
+        break;
+    }
+    pthread_mutex_unlock(&events_lock);
+
+    free(hevent);
+}
+
 // Create a thread monitoring events.
 int initialize_event_monitor() {
     epoll_fd = epoll_create1(0);

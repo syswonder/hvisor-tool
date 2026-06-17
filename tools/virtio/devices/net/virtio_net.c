@@ -26,6 +26,11 @@ static uint8_t trashbuf[1600];
 
 NetDev *init_net_dev(uint8_t mac[]) {
     NetDev *dev = malloc(sizeof(NetDev));
+    if (!dev) {
+        log_error("failed to allocate net device");
+        return NULL;
+    }
+
     dev->config.mac[0] = mac[0];
     dev->config.mac[1] = mac[1];
     dev->config.mac[2] = mac[2];
@@ -240,6 +245,7 @@ int virtio_net_init(VirtIODevice *vdev, char *devname) {
     if (set_nonblocking(net->tapfd) < 0) {
         close(net->tapfd);
         net->tapfd = -1;
+        return -1;
     }
     // register an epoll read event for tap device
     net->event = add_event(net->tapfd, EPOLLIN, virtio_net_event_handler, vdev);
@@ -254,10 +260,20 @@ int virtio_net_init(VirtIODevice *vdev, char *devname) {
 }
 
 void virtio_net_close(VirtIODevice *vdev) {
+    if (!vdev)
+        return;
+
     NetDev *dev = vdev->dev;
-    close(dev->tapfd);
-    free(dev->event);
-    free(dev);
+    if (dev) {
+        if (dev->event) {
+            remove_event(dev->event);
+            dev->event = NULL;
+        }
+        if (dev->tapfd >= 0)
+            close(dev->tapfd);
+        dev->tapfd = -1;
+        free(dev);
+    }
     free(vdev->vqs);
     free(vdev);
 }

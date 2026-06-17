@@ -338,6 +338,8 @@ void virtio_gpu_create_drm_framebuffer(GPUScanout *scanout, uint32_t *error) {
         *error = VIRTIO_GPU_RESP_ERR_UNSPEC;
         return;
     } // Create a dumb object
+    fb->drm_dumb_handle = dumb.handle;
+    fb->drm_dumb_size = dumb.size;
 
     map.handle = dumb.handle;
     // Bind the video memory to the framebuffer, get the offset based on the
@@ -368,9 +370,11 @@ void virtio_gpu_create_drm_framebuffer(GPUScanout *scanout, uint32_t *error) {
     if (drmModeAddFB(scanout->card0_fd, dumb.width, dumb.height, 24, 32,
                      dumb.pitch, dumb.handle, &fb_id) < 0) {
         log_error("%s failed to add a drm_framebuffer to card0", __func__);
+        virtio_gpu_remove_drm_framebuffer(scanout);
         *error = VIRTIO_GPU_RESP_ERR_UNSPEC;
         return;
     }
+    fb->fb_id = fb_id;
 
     ///
     log_debug("%s create a drm_framebuffer with width: %d, height: %d, "
@@ -382,7 +386,7 @@ void virtio_gpu_create_drm_framebuffer(GPUScanout *scanout, uint32_t *error) {
     void *vaddr = mmap(0, dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED,
                        scanout->card0_fd, map.offset);
 
-    if (!vaddr) {
+    if (vaddr == MAP_FAILED) {
         log_error("%s cannot map drm_framebuffer of scanout", __func__);
         virtio_gpu_remove_drm_framebuffer(scanout);
         *error = VIRTIO_GPU_RESP_ERR_UNSPEC;
@@ -392,9 +396,6 @@ void virtio_gpu_create_drm_framebuffer(GPUScanout *scanout, uint32_t *error) {
     log_debug("%s map drm_framebuffer to %x with size %d", __func__, vaddr,
               dumb.size);
 
-    fb->fb_id = fb_id;
-    fb->drm_dumb_handle = dumb.handle;
-    fb->drm_dumb_size = dumb.size;
     fb->fb_addr = vaddr;
     fb->enabled = true;
 }
@@ -469,19 +470,21 @@ void virtio_gpu_copy_and_flush(GPUScanout *scanout, GPUSimpleResource *res,
 void virtio_gpu_remove_drm_framebuffer(GPUScanout *scanout) {
     GPUFrameBuffer *fb = &scanout->frame_buffer;
 
-    if (!fb || !fb->enabled || !fb->fb_addr) {
-        log_error("%s found drm_framebuffer is not enabled yet");
+    if (!fb ||
+        (!fb->enabled && !fb->fb_id && !fb->drm_dumb_handle && !fb->fb_addr)) {
         return;
     }
 
     struct drm_mode_destroy_dumb destory = {0};
     destory.handle = fb->drm_dumb_handle;
 
-    drmModeRmFB(scanout->card0_fd, fb->fb_id);
-    if (fb->fb_addr != NULL) {
+    if (scanout->card0_fd >= 0 && fb->fb_id)
+        drmModeRmFB(scanout->card0_fd, fb->fb_id);
+    if (fb->fb_addr != NULL && fb->fb_addr != MAP_FAILED) {
         munmap(fb->fb_addr, fb->drm_dumb_size);
     }
-    drmIoctl(scanout->card0_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destory);
+    if (scanout->card0_fd >= 0 && fb->drm_dumb_handle)
+        drmIoctl(scanout->card0_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destory);
 
     log_debug("%s destoryed drm_framebuffer with id: %d, handle: %d, size: %d",
               __func__, fb->fb_id, fb->drm_dumb_handle, fb->drm_dumb_size);

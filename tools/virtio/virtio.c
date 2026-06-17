@@ -224,20 +224,84 @@ inline void rw_barrier(void) {
 #endif
 }
 
-// create a virtio device.
-VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
-                                   uint64_t base_addr, uint64_t len,
-                                   uint32_t irq_id, void *arg0, void *arg1) {
+static void destroy_unpublished_virtio_device(VirtIODevice *vdev) {
+    if (!vdev)
+        return;
+
+    switch (vdev->type) {
+    case VirtioTBlock:
+        virtio_blk_close(vdev);
+        break;
+    case VirtioTNet:
+        virtio_net_close(vdev);
+        break;
+    case VirtioTConsole:
+        virtio_console_close(vdev);
+        break;
+    case VirtioTGPU:
+#ifdef ENABLE_VIRTIO_GPU
+        virtio_gpu_close(vdev);
+        break;
+#else
+        free(vdev->vqs);
+        free(vdev);
+        break;
+#endif
+    default:
+        free(vdev->vqs);
+        free(vdev);
+        break;
+    }
+}
+
+static int publish_virtio_devices(VirtIODevice **new_devs, size_t count) {
+    if (count == 0)
+        return 0;
+
+    pthread_mutex_lock(&VDEV_MUTEX);
+    if ((size_t)vdevs_num + count > MAX_DEVS) {
+        log_error("virtio device num exceed max limit");
+        pthread_mutex_unlock(&VDEV_MUTEX);
+        return -1;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        if (!new_devs[i] || !new_devs[i]->dev) {
+            log_error("failed to init dev");
+            pthread_mutex_unlock(&VDEV_MUTEX);
+            return -1;
+        }
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        log_info("create %s success",
+                 virtio_device_type_to_string(new_devs[i]->type));
+        vdevs[vdevs_num++] = new_devs[i];
+    }
+    pthread_mutex_unlock(&VDEV_MUTEX);
+
+    return 0;
+}
+
+// create a virtio device without publishing it to vdevs[].
+static VirtIODevice *
+create_virtio_device_unpublished(VirtioDeviceType dev_type, uint32_t zone_id,
+                                 uint64_t base_addr, uint64_t len,
+                                 uint32_t irq_id, void *arg0, void *arg1) {
     log_info(
         "create virtio device type %s, zone id %d, base addr %lx, len %lx, "
         "irq id %d",
         virtio_device_type_to_string(dev_type), zone_id, base_addr, len,
         irq_id);
     VirtIODevice *vdev = NULL;
-    int is_err;
+    int is_err = -1;
     vdev = calloc(1, sizeof(VirtIODevice));
     if (vdev == NULL) {
         log_error("failed to allocate virtio device");
+#ifdef ENABLE_VIRTIO_GPU
+        if (dev_type == VirtioTGPU)
+            free(arg0);
+#endif
         return NULL;
     }
     init_mmio_regs(&vdev->regs, dev_type);
@@ -254,8 +318,10 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
     switch (dev_type) {
     case VirtioTBlock:
         vdev->regs.dev_feature = BLK_SUPPORTED_FEATURES;
-        init_blk_dev(vdev);
-        init_virtio_queue(vdev, dev_type);
+        if (!init_blk_dev(vdev))
+            goto err;
+        if (init_virtio_queue(vdev, dev_type) != 0)
+            goto err;
         log_info("debug: init_blk_dev and init_virtio_queue finished\n");
         is_err = virtio_blk_init(vdev, (const char *)arg0);
         break;
@@ -263,14 +329,20 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
     case VirtioTNet:
         vdev->regs.dev_feature = NET_SUPPORTED_FEATURES;
         vdev->dev = init_net_dev(arg0);
-        init_virtio_queue(vdev, dev_type);
+        if (!vdev->dev)
+            goto err;
+        if (init_virtio_queue(vdev, dev_type) != 0)
+            goto err;
         is_err = virtio_net_init(vdev, (char *)arg1);
         break;
 
     case VirtioTConsole:
         vdev->regs.dev_feature = CONSOLE_SUPPORTED_FEATURES;
         vdev->dev = init_console_dev();
-        init_virtio_queue(vdev, dev_type);
+        if (!vdev->dev)
+            goto err;
+        if (init_virtio_queue(vdev, dev_type) != 0)
+            goto err;
         is_err = virtio_console_init(vdev);
         break;
 
@@ -279,7 +351,10 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
         vdev->regs.dev_feature = GPU_SUPPORTED_FEATURES;
         vdev->dev = init_gpu_dev((GPURequestedState *)arg0);
         free(arg0);
-        init_virtio_queue(vdev, dev_type);
+        if (!vdev->dev)
+            goto err;
+        if (init_virtio_queue(vdev, dev_type) != 0)
+            goto err;
         is_err = virtio_gpu_init(vdev);
 #else
         log_error("virtio gpu is not enabled");
@@ -293,36 +368,38 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
     }
 
     if (is_err)
-
         goto err;
-
-    pthread_mutex_lock(&VDEV_MUTEX);
-
-    // If reaches max number of virtual devices
-    if (vdevs_num == MAX_DEVS) {
-        log_error("virtio device num exceed max limit");
-        pthread_mutex_unlock(&VDEV_MUTEX);
-        goto err;
-    }
 
     if (vdev->dev == NULL) {
         log_error("failed to init dev");
-        pthread_mutex_unlock(&VDEV_MUTEX);
         goto err;
     }
-
-    log_info("create %s success", virtio_device_type_to_string(dev_type));
-    vdevs[vdevs_num++] = vdev;
-    pthread_mutex_unlock(&VDEV_MUTEX);
 
     return vdev;
 
 err:
-    free(vdev);
+    destroy_unpublished_virtio_device(vdev);
     return NULL;
 }
 
-void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
+// create and publish a single virtio device.
+VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
+                                   uint64_t base_addr, uint64_t len,
+                                   uint32_t irq_id, void *arg0, void *arg1) {
+    VirtIODevice *vdev = create_virtio_device_unpublished(
+        dev_type, zone_id, base_addr, len, irq_id, arg0, arg1);
+    if (!vdev)
+        return NULL;
+
+    if (publish_virtio_devices(&vdev, 1) != 0) {
+        destroy_unpublished_virtio_device(vdev);
+        return NULL;
+    }
+
+    return vdev;
+}
+
+int init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
     VirtQueue *vqs = NULL;
 
     log_info("Initializing virtio queue for zone:%d, device type:%s",
@@ -332,6 +409,8 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
     case VirtioTBlock:
         vdev->vqs_len = 1;
         vqs = malloc(sizeof(VirtQueue));
+        if (!vqs)
+            goto err;
         virtqueue_reset(vqs, 0);
         vqs->queue_num_max = VIRTQUEUE_BLK_MAX_SIZE;
         vqs->notify_handler = virtio_blk_notify_handler;
@@ -342,6 +421,8 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
     case VirtioTNet:
         vdev->vqs_len = NET_MAX_QUEUES;
         vqs = malloc(sizeof(VirtQueue) * NET_MAX_QUEUES);
+        if (!vqs)
+            goto err;
         for (int i = 0; i < NET_MAX_QUEUES; ++i) {
             virtqueue_reset(vqs, i);
             vqs[i].queue_num_max = VIRTQUEUE_NET_MAX_SIZE;
@@ -355,6 +436,8 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
     case VirtioTConsole:
         vdev->vqs_len = CONSOLE_MAX_QUEUES;
         vqs = malloc(sizeof(VirtQueue) * CONSOLE_MAX_QUEUES);
+        if (!vqs)
+            goto err;
         for (int i = 0; i < CONSOLE_MAX_QUEUES; ++i) {
             virtqueue_reset(vqs, i);
             vqs[i].queue_num_max = VIRTQUEUE_CONSOLE_MAX_SIZE;
@@ -371,6 +454,8 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
 #ifdef ENABLE_VIRTIO_GPU
         vdev->vqs_len = GPU_MAX_QUEUES;
         vqs = malloc(sizeof(VirtQueue) * GPU_MAX_QUEUES);
+        if (!vqs)
+            goto err;
         for (int i = 0; i < GPU_MAX_QUEUES; ++i) {
             virtqueue_reset(vqs, i);
             vqs[i].queue_num_max = VIRTQUEUE_GPU_MAX_SIZE;
@@ -381,12 +466,19 @@ void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
         vdev->vqs = vqs;
 #else
         log_error("virtio gpu is not enabled");
+        return -1;
 #endif
         break;
 
     default:
-        break;
+        return -1;
     }
+
+    return 0;
+
+err:
+    log_error("failed to allocate virtio queue");
+    return -1;
 }
 
 void init_mmio_regs(VirtMmioRegs *regs, VirtioDeviceType type) {
@@ -1503,8 +1595,11 @@ static int parse_virtio_device_config(cJSON *device_json, uint32_t zone_id,
     return 0;
 }
 
-static int create_virtio_device_from_config(const VirtioDeviceConfig *cfg) {
+static int create_virtio_device_from_config(const VirtioDeviceConfig *cfg,
+                                            VirtIODevice **out_vdev) {
     void *arg0 = NULL, *arg1 = NULL;
+
+    *out_vdev = NULL;
 
     if (!cfg->enabled)
         return 0;
@@ -1542,8 +1637,9 @@ static int create_virtio_device_from_config(const VirtioDeviceConfig *cfg) {
         return -1;
     }
 
-    if (!create_virtio_device(cfg->type, cfg->zone_id, cfg->addr, cfg->len,
-                              cfg->irq, arg0, arg1)) {
+    *out_vdev = create_virtio_device_unpublished(
+        cfg->type, cfg->zone_id, cfg->addr, cfg->len, cfg->irq, arg0, arg1);
+    if (!*out_vdev) {
         return -1;
     }
 
@@ -1552,12 +1648,17 @@ static int create_virtio_device_from_config(const VirtioDeviceConfig *cfg) {
 
 int create_virtio_device_from_json(cJSON *device_json, int zone_id) {
     VirtioDeviceConfig cfg;
+    VirtIODevice *vdev = NULL;
 
     if (parse_virtio_device_config(device_json, zone_id, &cfg) != 0) {
         return -1;
     }
 
-    if (create_virtio_device_from_config(&cfg) != 0) {
+    if (create_virtio_device_from_config(&cfg, &vdev) != 0) {
+        return -1;
+    }
+    if (vdev && publish_virtio_devices(&vdev, 1) != 0) {
+        destroy_unpublished_virtio_device(vdev);
         return -1;
     }
 
@@ -1852,12 +1953,41 @@ static void publish_virtio_mmio_addrs(void) {
     write_barrier();
 }
 
-static int create_virtio_zone_devices(const VirtioZoneConfig *cfg) {
-    for (size_t i = 0; i < cfg->device_num; i++) {
-        if (create_virtio_device_from_config(&cfg->devices[i]) != 0) {
-            log_error("create virtio device failed");
-            return -1;
+static int create_virtio_config_devices(const VirtioConfig *cfg) {
+    VirtIODevice *new_devs[MAX_DEVS] = {NULL};
+    size_t new_devs_num = 0;
+
+    for (size_t zi = 0; zi < cfg->zone_num; zi++) {
+        const VirtioZoneConfig *zone = &cfg->zones[zi];
+
+        for (size_t di = 0; di < zone->device_num; di++) {
+            VirtIODevice *vdev = NULL;
+            if (create_virtio_device_from_config(&zone->devices[di], &vdev) !=
+                0) {
+                log_error("create virtio device failed");
+                for (size_t i = 0; i < new_devs_num; i++)
+                    destroy_unpublished_virtio_device(new_devs[i]);
+                return -1;
+            }
+
+            if (!vdev)
+                continue;
+            if (new_devs_num == MAX_DEVS) {
+                log_error("virtio device num exceed max limit");
+                destroy_unpublished_virtio_device(vdev);
+                for (size_t i = 0; i < new_devs_num; i++)
+                    destroy_unpublished_virtio_device(new_devs[i]);
+                return -1;
+            }
+
+            new_devs[new_devs_num++] = vdev;
         }
+    }
+
+    if (publish_virtio_devices(new_devs, new_devs_num) != 0) {
+        for (size_t i = 0; i < new_devs_num; i++)
+            destroy_unpublished_virtio_device(new_devs[i]);
+        return -1;
     }
 
     return 0;
@@ -1922,11 +2052,15 @@ int virtio_start_from_json(char *json_path) {
     }
 
     for (size_t i = 0; i < config.zone_num; i++) {
-        if (mmap_virtio_zone_memory(&config.zones[i]) != 0 ||
-            create_virtio_zone_devices(&config.zones[i]) != 0) {
+        if (mmap_virtio_zone_memory(&config.zones[i]) != 0) {
             err = -1;
             goto err_out;
         }
+    }
+
+    if (create_virtio_config_devices(&config) != 0) {
+        err = -1;
+        goto err_out;
     }
 
 err_out:

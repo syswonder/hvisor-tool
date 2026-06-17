@@ -50,6 +50,9 @@ typedef struct virtio_blk_dev {
     pthread_cond_t cond;
     TAILQ_HEAD(, blkp_req) procq;
     int close;
+    bool thread_started;
+    bool mutex_initialized;
+    bool cond_initialized;
 } BlkDev;
 
 BlkDev *init_blk_dev(VirtIODevice *vdev);
