@@ -494,6 +494,12 @@ int process_descriptor_chain(VirtQueue *vq, uint16_t *desc_idx,
     // Update chain length and reset next to the first descriptor
     chain_len += i + 1, next = *desc_idx;
 
+    // Guard against integer overflow in allocation size (chain_len is guest-controlled)
+    if (chain_len <= 0 || (size_t)chain_len > 65536 - append_len) {
+        log_error("invalid descriptor chain length: %d", chain_len);
+        return -1;
+    }
+
     // Allocate a buffer for each descriptor, using iov to manage them uniformly
     *iov = malloc(sizeof(struct iovec) * (chain_len + append_len));
     if (copy_flags)
