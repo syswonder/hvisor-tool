@@ -623,13 +623,20 @@ static int parse_pci_config(cJSON *root, zone_config_t *config) {
         cJSON *dev_function_json =
             SAFE_CJSON_GET_OBJECT_ITEM(dev_config_json, "function");
         cJSON *dev_vbus_json =
-            SAFE_CJSON_GET_OBJECT_ITEM(dev_config_json, "v_bus");
+            cJSON_GetObjectItemCaseSensitive(dev_config_json, "v_bus");
         cJSON *dev_vdevice_json =
-            SAFE_CJSON_GET_OBJECT_ITEM(dev_config_json, "v_device");
+            cJSON_GetObjectItemCaseSensitive(dev_config_json, "v_device");
         cJSON *dev_vfunction_json =
-            SAFE_CJSON_GET_OBJECT_ITEM(dev_config_json, "v_function");
+            cJSON_GetObjectItemCaseSensitive(dev_config_json, "v_function");
         cJSON *dev_type_json =
             SAFE_CJSON_GET_OBJECT_ITEM(dev_config_json, "dev_type");
+
+        if (!dev_vbus_json)
+            dev_vbus_json = dev_bus_json;
+        if (!dev_vdevice_json)
+            dev_vdevice_json = dev_device_json;
+        if (!dev_vfunction_json)
+            dev_vfunction_json = dev_function_json;
 
         if (parse_json_linux_u8(dev_domain_json, &dev_config->domain) != 0 ||
             parse_json_linux_u8(dev_bus_json, &dev_config->bus) != 0 ||
@@ -709,7 +716,7 @@ static int zone_start_from_json(const char *json_config_path,
 
     for (int i = 0; i < num_cpus; i++) {
         config->cpus |=
-            (1 << SAFE_CJSON_GET_ARRAY_ITEM(cpus_json, i)->valueint);
+            (1ULL << SAFE_CJSON_GET_ARRAY_ITEM(cpus_json, i)->valueint);
     }
 
     int num_memory_regions = SAFE_CJSON_GET_ARRAY_SIZE(memory_regions_json);

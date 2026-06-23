@@ -152,16 +152,26 @@ BlkDev *init_blk_dev(VirtIODevice *vdev) {
     }
     dev->cond_initialized = true;
     TAILQ_INIT(&dev->procq);
+    return dev;
+}
+
+int start_blk_worker(VirtIODevice *vdev) {
+    if (!vdev || !vdev->dev) {
+        log_error("invalid blk device");
+        return -1;
+    }
+
+    BlkDev *dev = vdev->dev;
+    if (dev->thread_started)
+        return 0;
+
     if (pthread_create(&dev->tid, NULL, blkproc_thread, vdev) != 0) {
         log_error("failed to create blk thread");
-        pthread_cond_destroy(&dev->cond);
-        pthread_mutex_destroy(&dev->mtx);
-        free(dev);
-        vdev->dev = NULL;
-        return NULL;
+        return -1;
     }
+
     dev->thread_started = true;
-    return dev;
+    return 0;
 }
 
 int virtio_blk_init(VirtIODevice *vdev, const char *img_path) {

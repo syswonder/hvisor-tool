@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <net/if.h>
 #include <signal.h>
@@ -73,14 +74,19 @@ typedef struct virtio_control_response {
 static int ctrl_fd = -1;
 static pthread_t ctrl_tid;
 
-// the index of `zone_mem[i]`
-#define VIRT_ADDR 0
-#define ZONE0_IPA 1
-#define ZONEX_IPA 2
-#define MEM_SIZE 3
+struct zone_mem_region {
+    uintptr_t virt_addr;
+    uintptr_t zone0_ipa;
+    uintptr_t zonex_ipa;
+    uintptr_t mem_size;
+};
 
-#define MAX_RAMS 4
-unsigned long long zone_mem[MAX_ZONES][MAX_RAMS][4];
+struct zone_mem {
+    struct zone_mem_region regions[CONFIG_MAX_MEMORY_REGIONS];
+    size_t num_regions;
+};
+
+struct zone_mem zone_mem[MAX_ZONES];
 
 typedef struct virtio_memory_region_config {
     uint64_t zone0_ipa;
@@ -105,7 +111,7 @@ typedef struct virtio_device_config {
 typedef struct virtio_zone_config {
     uint32_t zone_id;
     size_t memory_region_num;
-    VirtioMemoryRegionConfig memory_regions[MAX_RAMS];
+    VirtioMemoryRegionConfig memory_regions[CONFIG_MAX_MEMORY_REGIONS];
     size_t device_num;
     VirtioDeviceConfig devices[MAX_DEVS];
 } VirtioZoneConfig;
@@ -143,29 +149,6 @@ int set_nonblocking(int fd) {
         return -1;
     }
     return 0;
-}
-
-int get_zone_ram_index(void *zonex_ipa, int zone_id) {
-    if (zone_id < 0 || zone_id >= MAX_ZONES) {
-        log_error("invalid zone id %d", zone_id);
-        return -1;
-    }
-
-    pthread_mutex_lock(&ZONE_MEM_MUTEX);
-    for (int i = 0; i < MAX_RAMS; i++) {
-        if (zone_mem[zone_id][i][MEM_SIZE] == 0)
-            continue;
-        ;
-        if ((uintptr_t)zonex_ipa >= zone_mem[zone_id][i][ZONEX_IPA] &&
-            (uintptr_t)zonex_ipa < zone_mem[zone_id][i][ZONEX_IPA] +
-                                       zone_mem[zone_id][i][MEM_SIZE]) {
-            pthread_mutex_unlock(&ZONE_MEM_MUTEX);
-            return i;
-        }
-    }
-    pthread_mutex_unlock(&ZONE_MEM_MUTEX);
-    log_error("can't find zone mem index for zonex ipa %p", zonex_ipa);
-    return -1;
 }
 
 inline int is_queue_full(unsigned int front, unsigned int rear,
@@ -324,6 +307,8 @@ create_virtio_device_unpublished(VirtioDeviceType dev_type, uint32_t zone_id,
             goto err;
         log_info("debug: init_blk_dev and init_virtio_queue finished\n");
         is_err = virtio_blk_init(vdev, (const char *)arg0);
+        if (is_err == 0)
+            is_err = start_blk_worker(vdev);
         break;
 
     case VirtioTNet:
@@ -539,18 +524,28 @@ bool desc_is_writable(volatile VirtqDesc *desc_table, uint16_t idx) {
 }
 
 void *get_virt_addr(void *zonex_ipa, int zone_id) {
-    int ram_idx = get_zone_ram_index(zonex_ipa, zone_id);
+    if (zone_id < 0 || zone_id >= MAX_ZONES) {
+        log_error("invalid zone id %d", zone_id);
+        return NULL;
+    }
+
+    uintptr_t ipa = (uintptr_t)zonex_ipa;
     void *virt_addr = NULL;
 
-    if (ram_idx < 0)
-        return NULL;
-
     pthread_mutex_lock(&ZONE_MEM_MUTEX);
-    virt_addr = (void *)(uintptr_t)(zone_mem[zone_id][ram_idx][VIRT_ADDR] -
-                                    zone_mem[zone_id][ram_idx][ZONEX_IPA] +
-                                    (uintptr_t)zonex_ipa);
+    struct zone_mem *z = &zone_mem[zone_id];
+    for (size_t i = 0; i < z->num_regions; i++) {
+        uintptr_t lef = z->regions[i].zonex_ipa;
+        uintptr_t rig = z->regions[i].zonex_ipa + z->regions[i].mem_size;
+        if (lef <= ipa && ipa < rig) {
+            virt_addr = (void *)(ipa - lef + z->regions[i].virt_addr);
+            break;
+        }
+    }
     pthread_mutex_unlock(&ZONE_MEM_MUTEX);
 
+    if (!virt_addr)
+        log_error("can't find zone mem index for zonex_ipa = 0x%" PRIxPTR, ipa);
     return virt_addr;
 }
 
@@ -1206,11 +1201,10 @@ void virtio_close() {
 
     munmap((void *)virtio_bridge, MMAP_SIZE);
     for (int i = 0; i < MAX_ZONES; i++) {
-        for (int j = 0; j < MAX_RAMS; j++)
-            if (zone_mem[i][j][MEM_SIZE] != 0) {
-                munmap((void *)zone_mem[i][j][VIRT_ADDR],
-                       zone_mem[i][j][MEM_SIZE]);
-            }
+        struct zone_mem *z = &zone_mem[i];
+        for (size_t j = 0; j < z->num_regions; j++)
+            if (z->regions[j].mem_size != 0)
+                munmap((void *)z->regions[j].virt_addr, z->regions[j].mem_size);
     }
 
     log_warn("virtio daemon exit successfully");
@@ -1699,8 +1693,10 @@ static int parse_virtio_zone_config(cJSON *zone_json, VirtioZoneConfig *cfg) {
     cJSON *memory_region_json =
         SAFE_CJSON_GET_OBJECT_ITEM(zone_json, "memory_region");
     size_t num_mems = SAFE_CJSON_GET_ARRAY_SIZE(memory_region_json);
-    if (num_mems > MAX_RAMS) {
-        log_error("Exceed maximum RAM region number");
+    if (num_mems > CONFIG_MAX_MEMORY_REGIONS) {
+        log_error("zone %d: %zu memory regions exceeds "
+                  "CONFIG_MAX_MEMORY_REGIONS=%d",
+                  cfg->zone_id, num_mems, CONFIG_MAX_MEMORY_REGIONS);
         return -1;
     }
     cfg->memory_region_num = num_mems;
@@ -1781,11 +1777,13 @@ static bool same_memory_region(const VirtioMemoryRegionConfig *a,
 
 static int find_zone_memory_region_locked(uint32_t zone_id,
                                           const VirtioMemoryRegionConfig *mem) {
-    for (int i = 0; i < MAX_RAMS; i++) {
+    const struct zone_mem *z = &zone_mem[zone_id];
+
+    for (size_t i = 0; i < z->num_regions; i++) {
         VirtioMemoryRegionConfig existing = {
-            .zone0_ipa = zone_mem[zone_id][i][ZONE0_IPA],
-            .zonex_ipa = zone_mem[zone_id][i][ZONEX_IPA],
-            .size = zone_mem[zone_id][i][MEM_SIZE],
+            .zone0_ipa = z->regions[i].zone0_ipa,
+            .zonex_ipa = z->regions[i].zonex_ipa,
+            .size = z->regions[i].mem_size,
         };
 
         if (existing.size == 0)
@@ -1802,15 +1800,6 @@ static int find_zone_memory_region_locked(uint32_t zone_id,
                       zone_id);
             return -2;
         }
-    }
-
-    return -1;
-}
-
-static int find_empty_zone_memory_slot_locked(uint32_t zone_id) {
-    for (int i = 0; i < MAX_RAMS; i++) {
-        if (zone_mem[zone_id][i][MEM_SIZE] == 0)
-            return i;
     }
 
     return -1;
@@ -1883,31 +1872,33 @@ static int validate_virtio_config_devices(const VirtioConfig *cfg) {
 static int mmap_virtio_zone_memory(const VirtioZoneConfig *cfg) {
     for (size_t i = 0; i < cfg->memory_region_num; i++) {
         const VirtioMemoryRegionConfig *mem = &cfg->memory_regions[i];
-        int slot;
+        size_t slot;
+        int found;
         if (mem->size == 0) {
             log_error("Invalid memory size");
             return -1;
         }
 
         pthread_mutex_lock(&ZONE_MEM_MUTEX);
-        slot = find_zone_memory_region_locked(cfg->zone_id, mem);
-        if (slot >= 0) {
+        found = find_zone_memory_region_locked(cfg->zone_id, mem);
+        if (found >= 0) {
             pthread_mutex_unlock(&ZONE_MEM_MUTEX);
             log_info("reuse mapped memory for zone %d, zonex_ipa is %lx",
                      cfg->zone_id, mem->zonex_ipa);
             continue;
         }
-        if (slot == -2) {
+        if (found == -2) {
             pthread_mutex_unlock(&ZONE_MEM_MUTEX);
             return -1;
         }
-        slot = find_empty_zone_memory_slot_locked(cfg->zone_id);
-        pthread_mutex_unlock(&ZONE_MEM_MUTEX);
-        if (slot < 0) {
+        if (zone_mem[cfg->zone_id].num_regions >= CONFIG_MAX_MEMORY_REGIONS) {
+            pthread_mutex_unlock(&ZONE_MEM_MUTEX);
             log_error("Exceed maximum RAM region number for zone %d",
                       cfg->zone_id);
             return -1;
         }
+        slot = zone_mem[cfg->zone_id].num_regions;
+        pthread_mutex_unlock(&ZONE_MEM_MUTEX);
 
         log_info("debug: zone0_ipa is %lx, zonex_ipa is %lx, mem_size is %lx",
                  mem->zone0_ipa, mem->zonex_ipa, mem->size);
@@ -1925,16 +1916,20 @@ static int mmap_virtio_zone_memory(const VirtioZoneConfig *cfg) {
         }
 
         pthread_mutex_lock(&ZONE_MEM_MUTEX);
-        if (zone_mem[cfg->zone_id][slot][MEM_SIZE] != 0) {
+        if (slot != zone_mem[cfg->zone_id].num_regions ||
+            zone_mem[cfg->zone_id].num_regions >= CONFIG_MAX_MEMORY_REGIONS) {
             pthread_mutex_unlock(&ZONE_MEM_MUTEX);
             munmap(virt_addr, mem->size);
             log_error("zone memory mapping slot was reused unexpectedly");
             return -1;
         }
-        zone_mem[cfg->zone_id][slot][VIRT_ADDR] = (uintptr_t)virt_addr;
-        zone_mem[cfg->zone_id][slot][ZONE0_IPA] = mem->zone0_ipa;
-        zone_mem[cfg->zone_id][slot][ZONEX_IPA] = mem->zonex_ipa;
-        zone_mem[cfg->zone_id][slot][MEM_SIZE] = mem->size;
+        zone_mem[cfg->zone_id].regions[slot] = (struct zone_mem_region){
+            .virt_addr = (uintptr_t)virt_addr,
+            .zone0_ipa = mem->zone0_ipa,
+            .zonex_ipa = mem->zonex_ipa,
+            .mem_size = mem->size,
+        };
+        zone_mem[cfg->zone_id].num_regions++;
         pthread_mutex_unlock(&ZONE_MEM_MUTEX);
     }
 
