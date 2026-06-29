@@ -155,6 +155,7 @@ BlkDev *init_blk_dev(VirtIODevice *vdev) {
     return dev;
 }
 
+// Start the worker only after the backing image is opened successfully.
 int start_blk_worker(VirtIODevice *vdev) {
     if (!vdev || !vdev->dev) {
         log_error("invalid blk device");
@@ -193,8 +194,8 @@ int virtio_blk_init(VirtIODevice *vdev, const char *img_path) {
     dev->config.size_max = blk_size;
     dev->img_fd = img_fd;
     vdev->virtio_close = virtio_blk_close;
-    log_info("debug: virtio_blk_init: %s, size is %lld", img_path,
-             dev->config.capacity);
+    log_debug("virtio_blk_init: %s, size is %lld", img_path,
+              dev->config.capacity);
     return 0;
 }
 

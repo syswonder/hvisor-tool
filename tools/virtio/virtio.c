@@ -207,6 +207,8 @@ inline void rw_barrier(void) {
 #endif
 }
 
+// Destroy a device that has not been published to vdevs[] yet.
+// Device-specific close paths must tolerate partially initialized state.
 static void destroy_unpublished_virtio_device(VirtIODevice *vdev) {
     if (!vdev)
         return;
@@ -237,6 +239,7 @@ static void destroy_unpublished_virtio_device(VirtIODevice *vdev) {
     }
 }
 
+// Commit staged devices to the global table in one step.
 static int publish_virtio_devices(VirtIODevice **new_devs, size_t count) {
     if (count == 0)
         return 0;
@@ -266,7 +269,7 @@ static int publish_virtio_devices(VirtIODevice **new_devs, size_t count) {
     return 0;
 }
 
-// create a virtio device without publishing it to vdevs[].
+// Create a virtio device without publishing it to vdevs[].
 static VirtIODevice *
 create_virtio_device_unpublished(VirtioDeviceType dev_type, uint32_t zone_id,
                                  uint64_t base_addr, uint64_t len,
@@ -294,10 +297,6 @@ create_virtio_device_unpublished(VirtioDeviceType dev_type, uint32_t zone_id,
     vdev->irq_id = irq_id;
     vdev->type = dev_type;
 
-    log_info("debug: vdev->base_addr is %lx, vdev->len is %lx, vdev->zone_id "
-             "is %d, vdev->irq_id is %d",
-             vdev->base_addr, vdev->len, vdev->zone_id, vdev->irq_id);
-
     switch (dev_type) {
     case VirtioTBlock:
         vdev->regs.dev_feature = BLK_SUPPORTED_FEATURES;
@@ -305,7 +304,6 @@ create_virtio_device_unpublished(VirtioDeviceType dev_type, uint32_t zone_id,
             goto err;
         if (init_virtio_queue(vdev, dev_type) != 0)
             goto err;
-        log_info("debug: init_blk_dev and init_virtio_queue finished\n");
         is_err = virtio_blk_init(vdev, (const char *)arg0);
         if (is_err == 0)
             is_err = start_blk_worker(vdev);
@@ -1552,7 +1550,6 @@ static int parse_virtio_device_config(cJSON *device_json, uint32_t zone_id,
             return -1;
         }
         strncpy(cfg->img, img_json->valuestring, sizeof(cfg->img) - 1);
-        log_info("debug: img is %s", cfg->img);
     } else if (cfg->type == VirtioTNet) {
         cJSON *tap_json = SAFE_CJSON_GET_OBJECT_ITEM(device_json, "tap");
         if (!cJSON_IsString(tap_json) || tap_json->valuestring[0] == '\0') {
@@ -1900,21 +1897,16 @@ static int mmap_virtio_zone_memory(const VirtioZoneConfig *cfg) {
         slot = zone_mem[cfg->zone_id].num_regions;
         pthread_mutex_unlock(&ZONE_MEM_MUTEX);
 
-        log_info("debug: zone0_ipa is %lx, zonex_ipa is %lx, mem_size is %lx",
-                 mem->zone0_ipa, mem->zonex_ipa, mem->size);
-
+        // Do not hold ZONE_MEM_MUTEX while mmap may block.
         void *virt_addr = mmap(NULL, mem->size, PROT_READ | PROT_WRITE,
                                MAP_SHARED, ko_fd, (off_t)mem->zone0_ipa);
-
-        log_info("debug: mmap zone0_ipa is %lx, zonex_ipa is %lx, "
-                 "mem_size is %lx finished",
-                 mem->zone0_ipa, mem->zonex_ipa, mem->size);
 
         if (virt_addr == (void *)-1) {
             log_error("mmap failed");
             return -1;
         }
 
+        // Re-check the reserved slot before recording the new mapping.
         pthread_mutex_lock(&ZONE_MEM_MUTEX);
         if (slot != zone_mem[cfg->zone_id].num_regions ||
             zone_mem[cfg->zone_id].num_regions >= CONFIG_MAX_MEMORY_REGIONS) {
@@ -1952,6 +1944,7 @@ static int create_virtio_config_devices(const VirtioConfig *cfg) {
     VirtIODevice *new_devs[MAX_DEVS] = {NULL};
     size_t new_devs_num = 0;
 
+    // new_devs[] owns staged devices until publish_virtio_devices() succeeds.
     for (size_t zi = 0; zi < cfg->zone_num; zi++) {
         const VirtioZoneConfig *zone = &cfg->zones[zi];
 
