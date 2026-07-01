@@ -158,7 +158,7 @@ VirtIODevice *create_virtio_device(VirtioDeviceType dev_type, uint32_t zone_id,
                                    uint64_t base_addr, uint64_t len,
                                    uint32_t irq_id, void *arg0, void *arg1);
 
-void init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type);
+int init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type);
 
 void init_mmio_regs(VirtMmioRegs *regs, VirtioDeviceType type);
 
@@ -215,6 +215,8 @@ int create_virtio_device_from_json(cJSON *device_json, int zone_id);
 int virtio_start_from_json(char *json_path);
 
 int virtio_start(int argc, char *argv[]);
+
+int virtio_add(int argc, char *argv[]);
 
 void *read_file(const char *filename, uint64_t *filesize);
 

@@ -112,6 +112,16 @@ nohup ./hvisor virtio start virtio_cfg.json &
 ./hvisor zone start <vm_config.json>
 ```
 
+守护进程启动后，也支持继续向运行中的后端添加 Virtio 设备。后续配置可以通过以下命令发送给已经运行的守护进程：
+
+```bash
+./hvisor virtio add virtio_zone2.json
+./hvisor zone start zone2_linux.json
+```
+
+`virtio start` 会创建本地 Unix domain socket：`/run/hvisor-virtio.sock`。
+`virtio add` 会连接该 socket，并请求运行中的守护进程解析新的 Virtio 配置、在需要时映射 zone 内存、发布配置中启用的设备。原有带顶层 `zones` 数组的完整 `virtio_cfg.json` 仍然兼容。对于 MMIO Virtio 设备，建议先执行 `virtio add`，再启动将使用这些设备的 zone，这样 zone 配置仍可由 hvisor 注册对应的 Virtio MMIO 区域。
+
 其中 `&` 说明该命令会在后台运行。由于 Virtio 守护进程使用 `syslog` 记录日志，使用以下命令查看 `hvisor-tool` 的日志：
 
 *   **对于使用 `systemd` 的系统：**
