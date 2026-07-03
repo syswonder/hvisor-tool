@@ -857,6 +857,29 @@ static int zone_start_from_json(const char *json_config_path,
 #ifndef X86_64
     config->dtb_size = load_image_to_memory(dtb_filepath_json->valuestring,
                                             config->dtb_load_paddr);
+
+    // Load initramfs if configured (architecture-independent)
+    {
+        const cJSON *const initramfs_filepath_json =
+            SAFE_CJSON_GET_OBJECT_ITEM(root, "initramfs_filepath");
+        const cJSON *const initramfs_load_paddr_json =
+            SAFE_CJSON_GET_OBJECT_ITEM(root, "initramfs_load_paddr");
+        if (initramfs_filepath_json != NULL &&
+            initramfs_load_paddr_json != NULL) {
+            uintptr_t initramfs_load_paddr;
+            if (parse_json_address(initramfs_load_paddr_json,
+                                   &initramfs_load_paddr) != 0) {
+                log_error("Failed to parse initramfs_load_paddr");
+                goto err_out;
+            }
+            __u64 initramfs_size = load_image_to_memory(
+                initramfs_filepath_json->valuestring, initramfs_load_paddr);
+            log_info("Loaded initramfs (%s) to 0x%" PRIxPTR
+                     ", size: %llu bytes",
+                     initramfs_filepath_json->valuestring,
+                     initramfs_load_paddr, initramfs_size);
+        }
+    }
 #endif
 
     log_info("Kernel size: %llu, DTB size: %llu", config->kernel_size,
