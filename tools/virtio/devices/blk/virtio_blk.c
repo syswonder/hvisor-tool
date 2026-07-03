@@ -123,11 +123,12 @@ static void *blkproc_thread(void *arg) {
 
 // create blk dev.
 BlkDev *init_blk_dev(VirtIODevice *vdev) {
-    BlkDev *dev = malloc(sizeof(BlkDev));
+    BlkDev *dev = calloc(1, sizeof(BlkDev));
     vdev->dev = dev;
     dev->config.capacity = -1;
     dev->config.size_max = -1;
     dev->config.seg_max = BLK_SEG_MAX;
+    dev->config.blk_size = SECTOR_BSIZE;
     dev->img_fd = -1;
     dev->close = 0;
     // TODO: chang to thread poll
