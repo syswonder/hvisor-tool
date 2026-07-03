@@ -863,8 +863,7 @@ static int zone_start_from_json(const char *json_config_path,
         SAFE_CJSON_GET_OBJECT_ITEM(root, "initramfs_filepath");
     const cJSON *const initramfs_load_paddr_json =
         SAFE_CJSON_GET_OBJECT_ITEM(root, "initramfs_load_paddr");
-    if (initramfs_filepath_json != NULL &&
-        initramfs_load_paddr_json != NULL) {
+    if (initramfs_filepath_json != NULL && initramfs_load_paddr_json != NULL) {
         uintptr_t initramfs_load_paddr;
         if (parse_json_address(initramfs_load_paddr_json,
                                &initramfs_load_paddr) != 0) {
