@@ -11,6 +11,11 @@
 #include "virtio_net.h"
 #include "event_monitor.h"
 #include "log.h"
+
+// Max iov entries for a net descriptor chain.  Typical packets use 1-3
+// descriptors; 8 is ample for the stack-allocated iov buffer used with
+// process_descriptor_chain_buf().
+#define NET_IOV_MAX 8
 #include "virtio.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -21,9 +26,6 @@
 #include <sys/ioctl.h>
 #include <sys/uio.h>
 #include <unistd.h>
-// The max bytes of a packet in data link layer is 1518 bytes.
-static uint8_t trashbuf[1600];
-
 NetDev *init_net_dev(uint8_t mac[]) {
     NetDev *dev = malloc(sizeof(NetDev));
     dev->config.mac[0] = mac[0];
@@ -110,11 +112,10 @@ void virtio_net_event_handler(int fd, int epoll_type, void *param) {
     log_debug("virtio_net_event_handler");
     VirtIODevice *vdev = param;
     void *vnet_header;
-    struct iovec *iov, *iov_packet;
+    struct iovec *iov_packet;
     NetDev *net = vdev->dev;
     VirtQueue *vq = &vdev->vqs[NET_QUEUE_RX];
-    int n, len;
-    uint16_t idx;
+    int len;
     size_t header_len = get_nethdr_size(vdev);
     if (fd != net->tapfd || !(epoll_type & EPOLLIN)) {
         log_error("invalid event");
@@ -126,6 +127,7 @@ void virtio_net_event_handler(int fd, int epoll_type, void *param) {
     }
 
     // if vq is not setup, drop the packet
+    uint8_t trashbuf[1600];
     if (!net->rx_ready) {
         read(net->tapfd, trashbuf, sizeof(trashbuf));
         return;
@@ -136,24 +138,61 @@ void virtio_net_event_handler(int fd, int epoll_type, void *param) {
         virtio_inject_irq(vq);
         return;
     }
+    uint16_t batch_indices[VIRTQUEUE_NET_MAX_SIZE];
+    uint32_t batch_lens[VIRTQUEUE_NET_MAX_SIZE];
+    int batch_count = 0;
     while (!virtqueue_is_empty(vq)) {
-        n = process_descriptor_chain(vq, &idx, &iov, NULL, 0, false);
+        struct iovec in_buf[NET_IOV_MAX];
+        struct VirtioBufConfig cfg = {
+            .in_iov = in_buf,
+            .max_in = NET_IOV_MAX,
+        };
+        struct VirtioRequest req;
+        uint16_t idx = vq->avail_ring->ring[vq->last_avail_idx & (vq->num - 1)];
+        int n = process_descriptor_chain_buf(vq, idx, &cfg, &req);
         if (n < 1 || n > VIRTQUEUE_NET_MAX_SIZE) {
             log_error("process_descriptor_chain failed");
-            goto free_iov;
+            if (n >= 1) {
+                batch_indices[batch_count] = idx;
+                batch_lens[batch_count] = 0;
+                batch_count++;
+            }
+            break;
         }
-        vnet_header = iov[0].iov_base;
-        iov_packet = rm_iov_header(iov, &n, header_len);
-        if (iov_packet == NULL)
-            goto free_iov;
+
+        // RX: all buffers are VRING_DESC_F_WRITE → in_iov
+        vnet_header = req.in_iov[0].iov_base;
+        iov_packet = rm_iov_header(req.in_iov, &req.in_count, header_len);
+        if (iov_packet == NULL) {
+            batch_indices[batch_count] = idx;
+            batch_lens[batch_count] = 0;
+            batch_count++;
+            break;
+        }
         // Read a packet from tap device
-        len = readv(net->tapfd, iov_packet, n);
+        len = readv(net->tapfd, iov_packet, req.in_count);
 
         if (len < 0 && errno == EWOULDBLOCK) {
             // No more packets from tapfd, restore last_avail_idx.
             log_info("no more packets");
             vq->last_avail_idx--;
-            free(iov);
+            break;
+        }
+
+        if (len < 0) {
+            log_error("readv from tap failed, errno %d", errno);
+            batch_indices[batch_count] = idx;
+            batch_lens[batch_count] = 0;
+            batch_count++;
+            break;
+        }
+
+        if (len == 0) {
+            log_error("tap device EOF (closed or bridge down)");
+            batch_indices[batch_count] = idx;
+            batch_lens[batch_count] = 0;
+            batch_count++;
+            net->rx_ready = 0;
             break;
         }
 
@@ -162,22 +201,28 @@ void virtio_net_event_handler(int fd, int epoll_type, void *param) {
             ((NetHdr *)vnet_header)->num_buffers = 1;
         }
 
-        update_used_ring(vq, idx, len + header_len);
-        free(iov);
+        batch_indices[batch_count] = idx;
+        batch_lens[batch_count] = len + header_len;
+        batch_count++;
     }
 
+    if (batch_count > 0)
+        update_used_ring_batch(vq, batch_indices, batch_lens, batch_count);
     virtio_inject_irq(vq);
-    return;
-free_iov:
-    free(iov);
 }
 
-static void virtq_tx_handle_one_request(VirtIODevice *vdev, VirtQueue *vq) {
-    struct iovec *iov = NULL;
-    int i, n;
-    int packet_len, all_len; // all_len include the header length.
-    uint16_t idx;
-    static char pad[64];
+static void virtq_tx_handle_one_request(VirtIODevice *vdev, VirtQueue *vq,
+                                        uint16_t *out_indices,
+                                        uint32_t *out_lens, int *out_count) {
+    struct iovec out_buf[NET_IOV_MAX];
+    struct VirtioBufConfig cfg = {
+        .out_iov = out_buf,
+        .max_out = NET_IOV_MAX - 1,
+    };
+    struct VirtioRequest req;
+    int i, n, packet_len, all_len;
+    uint16_t idx = vq->avail_ring->ring[vq->last_avail_idx & (vq->num - 1)];
+    char pad[64] = {0};
     ssize_t len;
     NetDev *net = vdev->dev;
     size_t header_len = get_nethdr_size(vdev);
@@ -186,43 +231,71 @@ static void virtq_tx_handle_one_request(VirtIODevice *vdev, VirtQueue *vq) {
         return;
     }
 
-    n = process_descriptor_chain(vq, &idx, &iov, NULL, 1, false);
+    // NET_IOV_MAX - 1 reserves one slot for ethernet padding
+    n = process_descriptor_chain_buf(vq, idx, &cfg, &req);
     if (n < 1) {
         return;
     }
 
-    for (i = 0, all_len = 0; i < n; i++)
-        all_len += iov[i].iov_len;
+    // TX: no descriptors are VRING_DESC_F_WRITE → out_iov
+    if ((size_t)req.out_iov[0].iov_len < header_len) {
+        log_error("malformed TX packet: iov[0] too small for header");
+        out_indices[*out_count] = idx;
+        out_lens[*out_count] = 0;
+        (*out_count)++;
+        return;
+    }
+
+    for (i = 0, all_len = 0; i < req.out_count; i++)
+        all_len += req.out_iov[i].iov_len;
 
     packet_len = all_len - header_len;
-    iov[0].iov_base += header_len;
-    iov[0].iov_len -= header_len;
+    req.out_iov[0].iov_base += header_len;
+    req.out_iov[0].iov_len -= header_len;
     log_debug("packet send: %d bytes", packet_len);
 
     // The mininum packet for data link layer is 64 bytes.
     if (packet_len < 64) {
-        iov[n].iov_base = pad;
-        iov[n].iov_len = 64 - packet_len;
-        n++;
+        req.out_iov[req.out_count].iov_base = pad;
+        req.out_iov[req.out_count].iov_len = 64 - packet_len;
+        req.out_count++;
     }
-    len = writev(net->tapfd, iov, n);
+    len = writev(net->tapfd, req.out_iov, req.out_count);
     if (len < 0) {
         log_error("write tap failed, errno %d", errno);
     }
-    update_used_ring(vq, idx, all_len);
-    free(iov);
+    out_indices[*out_count] = idx;
+    out_lens[*out_count] = all_len;
+    (*out_count)++;
 }
 
 int virtio_net_txq_notify_handler(VirtIODevice *vdev, VirtQueue *vq) {
     log_debug("virtio_net_txq_notify_handler");
     virtqueue_disable_notify(vq);
-    while (!virtqueue_is_empty(vq)) {
-        virtq_tx_handle_one_request(vdev, vq);
+    uint16_t batch_indices[VIRTQUEUE_NET_MAX_SIZE];
+    uint32_t batch_lens[VIRTQUEUE_NET_MAX_SIZE];
+    int batch_count = 0;
+    for (;;) {
+        while (!virtqueue_is_empty(vq)) {
+            virtq_tx_handle_one_request(vdev, vq, batch_indices, batch_lens,
+                                        &batch_count);
+        }
+        if (batch_count > 0) {
+            update_used_ring_batch(vq, batch_indices, batch_lens, batch_count);
+            batch_count = 0;
+            virtio_inject_irq(vq);
+        }
+        virtqueue_enable_notify(vq);
+        // Re-check: guest may have added descriptors between our last
+        // empty check and enable_notify.  Without this, UDP streams
+        // lose descriptors permanently because each sendto() issues
+        // exactly one kick and the suppressed notification never fires.
+        if (!virtqueue_is_empty(vq)) {
+            virtqueue_disable_notify(vq);
+            continue;
+        }
+        break;
     }
-    virtqueue_enable_notify(vq);
-    // TODO: Can we don't inject irq when send packets to improve performance?
-    // Linux will recycle the used ring when send packets.
-    // virtio_inject_irq(vq);
     return 0;
 }
 
