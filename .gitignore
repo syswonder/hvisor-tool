@@ -29,3 +29,4 @@ __loongarch*
 compile_commands.json
 output/
 script.py
+/examples/jeston/rootfs.ext4
