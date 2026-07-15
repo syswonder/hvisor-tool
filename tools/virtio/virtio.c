@@ -41,8 +41,23 @@
 #include "virtio.h"
 #include "virtio_blk.h"
 #include "virtio_console.h"
-#include "virtio_gpu.h"
 #include "virtio_net.h"
+#ifdef ENABLE_VIRTIO_GPU
+#include "virtio_gpu.h"
+#endif
+#ifdef ENABLE_VIRTIO_SCMI
+#include "virtio_scmi.h"
+
+// Global variables to store phandle values
+uint32_t clock_phandle = 0;
+uint32_t reset_phandle = 0;
+uint32_t power_phandle = 0;
+
+// Global variables to store max num values
+uint32_t clock_max_num = 0;
+uint32_t reset_max_num = 0;
+uint32_t power_max_num = 0;
+#endif
 
 /// hvisor kernel module fd
 int ko_fd;
@@ -106,6 +121,22 @@ typedef struct virtio_device_config {
     uint8_t mac[6];
     uint32_t width;
     uint32_t height;
+#ifdef ENABLE_VIRTIO_SCMI
+    uint32_t clock_phandle;
+    uint32_t reset_phandle;
+    uint32_t power_phandle;
+    uint32_t clock_max_num;
+    uint32_t reset_max_num;
+    uint32_t power_max_num;
+    bool has_clock_phandle;
+    bool has_reset_phandle;
+    bool has_power_phandle;
+    bool has_power_max_num;
+    cJSON *allowed_list_json;
+    cJSON *reset_map_json;
+    cJSON *clock_map_json;
+    cJSON *power_map_json;
+#endif
 } VirtioDeviceConfig;
 
 typedef struct virtio_zone_config {
@@ -131,6 +162,8 @@ const char *virtio_device_type_to_string(VirtioDeviceType type) {
         return "virtio-blk";
     case VirtioTConsole:
         return "virtio-console";
+    case VirtioTSCMI:
+        return "virtio-scmi";
     case VirtioTGPU:
         return "virtio-gpu";
     default:
@@ -329,6 +362,18 @@ create_virtio_device_unpublished(VirtioDeviceType dev_type, uint32_t zone_id,
         is_err = virtio_console_init(vdev);
         break;
 
+    case VirtioTSCMI:
+#ifdef ENABLE_VIRTIO_SCMI
+        vdev->regs.dev_feature = SCMI_SUPPORTED_FEATURES;
+        vdev->dev = init_scmi_dev();
+        init_virtio_queue(vdev, dev_type);
+        is_err = 0;
+#else
+        log_error("virtio-scmi is not enabled");
+        goto err;
+#endif
+        break;
+
     case VirtioTGPU:
 #ifdef ENABLE_VIRTIO_GPU
         vdev->regs.dev_feature = GPU_SUPPORTED_FEATURES;
@@ -450,6 +495,22 @@ int init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
 #else
         log_error("virtio gpu is not enabled");
         return -1;
+#endif
+        break;
+
+    case VirtioTSCMI:
+#ifdef ENABLE_VIRTIO_SCMI
+        vdev->vqs_len = SCMI_MAX_QUEUES;
+        vqs = malloc(sizeof(VirtQueue) * SCMI_MAX_QUEUES);
+        for (int i = 0; i < SCMI_MAX_QUEUES; ++i) {
+            virtqueue_reset(vqs, i);
+            vqs[i].queue_num_max = VIRTQUEUE_SCMI_MAX_SIZE;
+            vqs[i].dev = vdev;
+        }
+        vqs[SCMI_QUEUE_TX].notify_handler = virtio_scmi_txq_notify_handler;
+        vdev->vqs = vqs;
+#else
+        log_error("virtio scmi is not enabled");
 #endif
         break;
 
@@ -810,7 +871,7 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
         offset -= VIRTIO_MMIO_CONFIG;
         // the first member of vdev->dev must be config.
         log_debug("read virtio dev config");
-        return *(uint64_t *)(vdev->dev + offset);
+        return *(uint64_t *)((uintptr_t)vdev->dev + offset);
     }
 
     if (size != 4) {
@@ -854,10 +915,6 @@ uint64_t virtio_mmio_read(VirtIODevice *vdev, uint64_t offset, unsigned size) {
             "clear lvz gintc irq injection bit to avoid endless interrupt...");
         ioctl(ko_fd, HVISOR_CLEAR_INJECT_IRQ);
 #endif
-        if (vdev->regs.interrupt_status == 0) {
-            log_error("virtio-mmio-read: interrupt status is 0, type is %d",
-                      vdev->type);
-        }
         return vdev->regs.interrupt_status;
     case VIRTIO_MMIO_STATUS:
         log_debug("read VIRTIO_MMIO_STATUS");
@@ -1381,8 +1438,8 @@ void handle_virtio_requests(void) {
     struct epoll_event events[16];
     while (true) {
 #ifndef LOONGARCH64
-        log_info("signal_count is %d, proc_count is %d", signal_count,
-                 proc_count);
+        log_debug("signal_count is %d, proc_count is %d", signal_count,
+                  proc_count);
 
         // Wait indefinitely for a signal or a kernel kick
         int nfds = epoll_wait(epoll_fd, events, 16, -1);
@@ -1434,7 +1491,7 @@ int virtio_init() {
     prctl(PR_SET_NAME, "hvisor-virtio", 0, 0, 0);
 
     log_info("hvisor init");
-    ko_fd = open("/dev/hvisor", O_RDWR);
+    ko_fd = open(HVISOR_DEVICE, O_RDWR);
     if (ko_fd < 0) {
         log_error("open hvisor failed");
         exit(1);
@@ -1490,6 +1547,8 @@ static int parse_virtio_device_type(const char *type,
         *dev_type = VirtioTConsole;
     } else if (strcmp(type, "gpu") == 0) {
         *dev_type = VirtioTGPU;
+    } else if (strcmp(type, "scmi") == 0) {
+        *dev_type = VirtioTSCMI;
     } else {
         log_error("unknown device type %s", type);
         return -1;
@@ -1581,6 +1640,60 @@ static int parse_virtio_device_config(cJSON *device_json, uint32_t zone_id,
             log_error("failed to parse gpu width or height");
             return -1;
         }
+    } else if (cfg->type == VirtioTSCMI) {
+#ifdef ENABLE_VIRTIO_SCMI
+        cJSON *clock_phandle_json =
+            cJSON_GetObjectItemCaseSensitive(device_json, "clock_phandle");
+        cJSON *reset_phandle_json =
+            cJSON_GetObjectItemCaseSensitive(device_json, "reset_phandle");
+        cJSON *power_phandle_json =
+            cJSON_GetObjectItemCaseSensitive(device_json, "power_phandle");
+        cJSON *power_max_num_json =
+            cJSON_GetObjectItemCaseSensitive(device_json, "power_max_num");
+
+        if (clock_phandle_json) {
+            if (parse_json_u32(clock_phandle_json, &cfg->clock_phandle) != 0)
+                return -1;
+            cfg->has_clock_phandle = true;
+        }
+        if (reset_phandle_json) {
+            if (parse_json_u32(reset_phandle_json, &cfg->reset_phandle) != 0)
+                return -1;
+            cfg->has_reset_phandle = true;
+        }
+        if (power_phandle_json) {
+            if (parse_json_u32(power_phandle_json, &cfg->power_phandle) != 0)
+                return -1;
+            cfg->has_power_phandle = true;
+        }
+        if (parse_json_u32(
+                SAFE_CJSON_GET_OBJECT_ITEM(device_json, "clock_max_num"),
+                &cfg->clock_max_num) != 0 ||
+            parse_json_u32(
+                SAFE_CJSON_GET_OBJECT_ITEM(device_json, "reset_max_num"),
+                &cfg->reset_max_num) != 0) {
+            log_error("failed to parse SCMI clock/reset limits");
+            return -1;
+        }
+        if (power_max_num_json) {
+            if (parse_json_u32(power_max_num_json, &cfg->power_max_num) != 0)
+                return -1;
+            cfg->has_power_max_num = true;
+        }
+
+        cfg->allowed_list_json =
+            cJSON_GetObjectItemCaseSensitive(device_json, "allowed_list");
+        cfg->reset_map_json =
+            cJSON_GetObjectItemCaseSensitive(device_json, "reset_map");
+        cfg->clock_map_json =
+            cJSON_GetObjectItemCaseSensitive(device_json, "clock_map");
+        cfg->power_map_json =
+            cJSON_GetObjectItemCaseSensitive(device_json, "power_map");
+#else
+        log_error(
+            "virtio-scmi is not enabled, please add VIRTIO_SCMI=y in make cmd");
+        return -1;
+#endif
     }
 
     return 0;
@@ -1620,6 +1733,45 @@ static int create_virtio_device_from_config(const VirtioDeviceConfig *cfg,
 #else
         log_error(
             "virtio-gpu is not enabled, please add VIRTIO_GPU=y in make cmd");
+        return -1;
+#endif
+        break;
+    case VirtioTSCMI:
+#ifdef ENABLE_VIRTIO_SCMI
+        if (cfg->has_clock_phandle)
+            clock_phandle = cfg->clock_phandle;
+        if (cfg->has_reset_phandle)
+            reset_phandle = cfg->reset_phandle;
+        if (cfg->has_power_phandle)
+            power_phandle = cfg->power_phandle;
+        clock_max_num = cfg->clock_max_num;
+        reset_max_num = cfg->reset_max_num;
+
+        extern int virtio_scmi_reset_init_map(cJSON *, cJSON *);
+        if (virtio_scmi_reset_init_map(cfg->allowed_list_json,
+                                       cfg->reset_map_json) < 0) {
+            log_error("Failed to initialize SCMI reset map");
+            return -1;
+        }
+
+        extern int virtio_scmi_clock_init_map(cJSON *, cJSON *);
+        if (virtio_scmi_clock_init_map(cfg->allowed_list_json,
+                                       cfg->clock_map_json) < 0) {
+            log_error("Failed to initialize SCMI clock allowed list and map");
+            return -1;
+        }
+
+        if (cfg->has_power_max_num) {
+            power_max_num = cfg->power_max_num;
+            if (virtio_scmi_power_init_map(cfg->allowed_list_json,
+                                           cfg->power_map_json) < 0) {
+                log_error("Failed to initialize SCMI power domain map");
+                return -1;
+            }
+        }
+#else
+        log_error(
+            "virtio-scmi is not enabled, please add VIRTIO_SCMI=y in make cmd");
         return -1;
 #endif
         break;
