@@ -3,36 +3,17 @@
  * Copyright (c) 2025 Syswonder
  *
  * Syswonder Website:
- *      https://www.syswonder.org
+ *      https://www.syswonder.org
  *
  * Authors:
- *      Linkun Chen <lkchen01@foxmail.com>
+ *      Linkun Chen <lkchen01@foxmail.com>
  */
 #ifndef _HVISOR_VIRTIO_SCMI_H
 #define _HVISOR_VIRTIO_SCMI_H
-#ifdef ENABLE_VIRTIO_SCMI
 
 #include "virtio.h"
 #include <stdbool.h>
 #include <stdint.h>
-
-// Generic mapping structure
-typedef struct {
-    uint32_t scmi_id;
-    uint32_t phys_id;
-} scmi_map_entry_t;
-
-// Generic mapping context
-typedef struct {
-    scmi_map_entry_t *map;
-    uint32_t map_count;
-    uint32_t *allowed_ids;
-    uint32_t allowed_count;
-    bool allow_all;
-} scmi_map_context_t;
-
-#define NSEC_PER_SEC 1000000000L
-#define SCMI_MAX_POLL_TO_NS (30 * NSEC_PER_SEC)
 
 /*
  * SCMI Packed Message Header Format
@@ -156,43 +137,61 @@ typedef struct {
 struct scmi_request {
     uint32_t header;   /* Packed SCMI message header */
     uint8_t payload[]; /* Message-specific payload */
-};
+} __attribute__((packed));
 
 struct scmi_response {
     uint32_t header;   /* Packed SCMI message header */
     uint32_t status;   /* Command status */
     uint8_t payload[]; /* Message-specific payload */
-};
+} __attribute__((packed));
 
 /* SCMI Base Protocol Attributes Response */
 struct scmi_msg_resp_base_attributes {
     uint8_t num_protocols;
     uint8_t num_agents;
     uint16_t reserved;
-};
+} __attribute__((packed));
+
+#define SCMI_MAX_DESCRIPTORS 16
+#define SCMI_MAX_BUFFER_SIZE (1024 * 1024) // 1MB
+#define SCMI_MAX_PROTOCOLS 16
+
+struct scmi_msg_resp_base_protocol_list {
+    uint32_t count;
+    uint32_t protocol_slots[(SCMI_MAX_PROTOCOLS + 3) / 4];
+} __attribute__((packed));
 
 struct scmi_msg_resp_clock_attributes {
     uint16_t num_clocks;
     uint8_t max_async_req;
     uint8_t reserved;
+} __attribute__((packed));
+
+struct scmi_resp_ctx {
+    struct iovec *iov; /* underlying response iovec */
+    size_t written;    /* bytes written so far */
+    size_t capacity;   /* total capacity (original iov_len) */
 };
 
-/* -------------------------- Token Maximum Value -------------------------- */
-#define SCMI_TOKEN_MAX                                                         \
-    ((1u << (SCMI_TOKEN_ID_HIGH - SCMI_TOKEN_ID_LOW + 1)) - 1)
+struct virtio_scmi_dev;
+
+struct scmi_dev_protocol_entry {
+    uint8_t protocol_id;
+    int (*handler)(struct virtio_scmi_dev *dev, uint8_t msg_id, uint16_t token,
+                   const struct iovec *req_iov, struct scmi_resp_ctx *ctx);
+};
 
 typedef struct virtio_scmi_dev {
     int fd;
+    uint32_t *clock_ids; /* NULL = protocol not supported */
+    uint32_t clock_count;
+    uint32_t *reset_ids;
+    uint32_t reset_count;
+    uint32_t *power_ids;
+    uint32_t power_count;
+    struct scmi_dev_protocol_entry protocols[SCMI_MAX_PROTOCOLS];
+    int protocol_count;
 } SCMIDev;
-
-/* -------------------------- Protocol Callback Table --------------------------
- */
-struct virtio_scmi_proto {
-    uint8_t proto_id; /* Protocol ID (e.g. SCMI_PROTO_ID_BASE) */
-    /* Handle protocol request: return 0 on success, negative for error */
-    int (*handle_req)(SCMIDev *dev, uint8_t msg_id, uint16_t token,
-                      const struct iovec *req_iov, struct iovec *resp_iov);
-};
 
 enum scmi_error_codes {
     SCMI_SUCCESS = 0,        /* Success */
@@ -210,9 +209,12 @@ enum scmi_error_codes {
 
 #define SCMI_SUPPORTED_FEATURES (1ULL << VIRTIO_F_VERSION_1)
 
-#define SCMI_MAX_DESCRIPTORS 16
-#define SCMI_MAX_BUFFER_SIZE (1024 * 1024) // 1MB
-#define SCMI_MAX_PROTOCOLS 16
+/* Per-device protocol registration */
+int scmi_dev_register_protocol(SCMIDev *dev, uint8_t protocol_id,
+                               int (*handler)(SCMIDev *dev, uint8_t msg_id,
+                                              uint16_t token,
+                                              const struct iovec *req_iov,
+                                              struct scmi_resp_ctx *ctx));
 
 /* Notification support */
 #define SCMI_MAX_QUEUES 2
@@ -228,7 +230,7 @@ struct scmi_base_error_notify_payld {
     uint32_t agent_id;
     uint32_t error_status;
     uint64_t msg_reports[SCMI_BASE_MAX_CMD_ERR_COUNT];
-};
+} __attribute__((packed));
 
 struct scmi_base_error_report {
     uint64_t timestamp;
@@ -236,47 +238,58 @@ struct scmi_base_error_report {
     bool fatal;
     uint32_t cmd_count;
     uint64_t reports[SCMI_BASE_MAX_CMD_ERR_COUNT];
-};
+} __attribute__((packed));
 
-/* SCMI Protocol Operations */
-struct scmi_protocol {
-    uint8_t id;
+void scmi_resp_ctx_init(struct scmi_resp_ctx *ctx, struct iovec *resp_iov);
 
-    /* Message handlers */
-    int (*handle_request)(SCMIDev *dev, uint8_t msg_id, uint16_t token,
-                          const struct iovec *req_iov, struct iovec *resp_iov);
-};
+void *scmi_resp_write(struct scmi_resp_ctx *ctx, size_t size);
+
+/* Protocol handler entry points */
+int virtio_scmi_base_handle_req(SCMIDev *dev, uint8_t msg_id, uint16_t token,
+                                const struct iovec *req_iov,
+                                struct scmi_resp_ctx *ctx);
+int virtio_scmi_clock_handle_req(SCMIDev *dev, uint8_t msg_id, uint16_t token,
+                                 const struct iovec *req_iov,
+                                 struct scmi_resp_ctx *ctx);
+int virtio_scmi_power_handle_req(SCMIDev *dev, uint8_t msg_id, uint16_t token,
+                                 const struct iovec *req_iov,
+                                 struct scmi_resp_ctx *ctx);
+int virtio_scmi_reset_handle_req(SCMIDev *dev, uint8_t msg_id, uint16_t token,
+                                 const struct iovec *req_iov,
+                                 struct scmi_resp_ctx *ctx);
 
 /* Core SCMI Functions */
 int scmi_validate_request(size_t req_size, size_t min_req_size,
                           size_t resp_size, size_t min_resp_size);
 
-int scmi_make_response(struct iovec *resp_iov, uint8_t protocol_id,
+int scmi_make_response(struct scmi_resp_ctx *ctx, uint8_t protocol_id,
                        uint8_t msg_id, uint16_t token, int32_t status);
-
-/* Protocol Registration */
-int scmi_register_protocol(const struct scmi_protocol *ops);
-
-const struct scmi_protocol *scmi_get_protocol_by_index(int index);
 
 int scmi_handle_message(SCMIDev *dev, uint8_t protocol_id, uint8_t msg_id,
                         uint16_t token, const struct iovec *req_iov,
-                        struct iovec *resp_iov);
+                        struct scmi_resp_ctx *ctx);
 
-int scmi_get_protocol_count(void);
-
-/* Generic mapping functions */
-int scmi_init_map(scmi_map_context_t *ctx, void *allowed_list_json,
-                  void *map_json, const char *id_key, const char *map_key);
-bool scmi_is_valid_id(scmi_map_context_t *ctx, uint32_t id);
-uint32_t scmi_map_id(scmi_map_context_t *ctx, uint32_t scmi_id);
-
-SCMIDev *init_scmi_dev();
+SCMIDev *scmi_dev_create(void);
+void scmi_dev_free(SCMIDev *dev);
 int virtio_scmi_txq_notify_handler(VirtIODevice *vdev, VirtQueue *vq);
+void virtio_scmi_close(VirtIODevice *vdev);
 
-/* Power Protocol */
-int virtio_scmi_power_init(void);
-int virtio_scmi_power_init_map(cJSON *allowed_list_json, cJSON *power_map_json);
+/* JSON array parsing: fills dev->clock_ids / dev->reset_ids / dev->power_ids */
+int scmi_dev_parse_clock_ids(SCMIDev *dev, void *json_array);
+int scmi_dev_parse_reset_ids(SCMIDev *dev, void *json_array);
+int scmi_dev_parse_power_ids(SCMIDev *dev, void *json_array);
 
-#endif
+/* /dev/hvisor fd, opened once in virtio_start() */
+extern int ko_fd;
+
+/* All SCMI protocol args structs share {subcmd, data_len} at offset 0. */
+struct hvisor_scmi_ioctl_hdr {
+    uint32_t subcmd;
+    uint32_t data_len;
+};
+
+/* Unified ioctl helper using the persistent ko_fd */
+int hvisor_scmi_ioctl_cmd(int ioctl_cmd, void *args, size_t args_size,
+                          uint32_t subcmd, const char *proto_name);
+
 #endif

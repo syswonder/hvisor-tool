@@ -31,20 +31,9 @@
                     "len": "0x200",
                     "irq": 75,
                     "status": "enable",
-                    "clock_phandle": 2,
-                    "reset_phandle": 2,
-                    "clock_max_num": 721,
-                    "reset_max_num": 1,
-                    "power_phandle": 93,
-                    "power_max_num": 44,
-                    "allowed_list": {
-                        "power_ids": ["*"],
-                        "reset_ids": [0],
-                        "clock_ids": ["*"]
-                    },
-                    "reset_map": {
-                        "0": 523
-                    }
+                    "clock_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+                    "reset_ids": [523],
+                    "power_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
                 }
             ]
         }

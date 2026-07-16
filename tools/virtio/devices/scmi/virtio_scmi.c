@@ -11,27 +11,78 @@
 #define _GNU_SOURCE
 
 #include "virtio_scmi.h"
+#include "json_parse.h"
 #include "log.h"
+#include "safe_cjson.h"
 #include "virtio.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
-SCMIDev *init_scmi_dev() {
-    SCMIDev *dev = (SCMIDev *)malloc(sizeof(SCMIDev));
-    if (dev) {
-        dev->fd = -1;
-        /* Initialize supported protocols */
-        extern int virtio_scmi_base_init(void);
-        extern int virtio_scmi_clock_init(void);
-        extern int virtio_scmi_reset_init(void);
-        extern int virtio_scmi_power_init(void);
-        virtio_scmi_base_init();
-        virtio_scmi_clock_init();
-        virtio_scmi_reset_init();
-        virtio_scmi_power_init();
+static int parse_id_array(cJSON *json_array, uint32_t **ids_out,
+                          uint32_t *count_out) {
+    if (!json_array || !cJSON_IsArray(json_array)) {
+        *ids_out = NULL;
+        *count_out = 0;
+        return 0;
     }
+
+    int count = cJSON_GetArraySize(json_array);
+    if (count == 0) {
+        *ids_out = NULL;
+        *count_out = 0;
+        return 0;
+    }
+
+    uint32_t *ids = malloc(sizeof(uint32_t) * count);
+    if (!ids) {
+        log_error("Failed to allocate ID array");
+        return -ENOMEM;
+    }
+
+    for (int i = 0; i < count; i++) {
+        cJSON *item = cJSON_GetArrayItem(json_array, i);
+        if (parse_json_u32(item, &ids[i]) != 0) {
+            log_error("Failed to parse ID at index %d", i);
+            free(ids);
+            return -EINVAL;
+        }
+    }
+
+    *ids_out = ids;
+    *count_out = (uint32_t)count;
+    return 0;
+}
+
+SCMIDev *scmi_dev_create(void) {
+    SCMIDev *dev = calloc(1, sizeof(SCMIDev));
+    if (dev)
+        dev->fd = -1;
     return dev;
+}
+
+void scmi_dev_free(SCMIDev *dev) {
+    if (!dev)
+        return;
+    free(dev->clock_ids);
+    free(dev->reset_ids);
+    free(dev->power_ids);
+    free(dev);
+}
+
+int scmi_dev_parse_clock_ids(SCMIDev *dev, void *json_array) {
+    return parse_id_array((cJSON *)json_array, &dev->clock_ids,
+                          &dev->clock_count);
+}
+
+int scmi_dev_parse_reset_ids(SCMIDev *dev, void *json_array) {
+    return parse_id_array((cJSON *)json_array, &dev->reset_ids,
+                          &dev->reset_count);
+}
+
+int scmi_dev_parse_power_ids(SCMIDev *dev, void *json_array) {
+    return parse_id_array((cJSON *)json_array, &dev->power_ids,
+                          &dev->power_count);
 }
 
 static int virtq_tx_handle_one_request(void *dev, VirtQueue *vq) {
@@ -40,6 +91,8 @@ static int virtq_tx_handle_one_request(void *dev, VirtQueue *vq) {
     uint16_t *flags = NULL;
     int ret = process_descriptor_chain(vq, &desc_idx, &iov, &flags,
                                        SCMI_MAX_DESCRIPTORS, true);
+    // desc_idx is valid iff ret > 0 (a descriptor was consumed from avail ring)
+    bool desc_valid = (ret > 0);
 
     if (ret <= 0 || iov == NULL || flags == NULL) {
         log_error("Failed to process descriptor chain or allocate memory");
@@ -69,22 +122,28 @@ static int virtq_tx_handle_one_request(void *dev, VirtQueue *vq) {
         goto error;
     }
 
+    // Initialize response context from the response iovec
+    struct scmi_resp_ctx ctx;
+    scmi_resp_ctx_init(&ctx, &iov[1]);
+
     // Dispatch request to protocol handler
     int status =
-        scmi_handle_message(dev, protocol_id, msg_id, token, &iov[0], &iov[1]);
+        scmi_handle_message(dev, protocol_id, msg_id, token, &iov[0], &ctx);
 
     if (status != 0) {
         log_error("Protocol handler failed: %d", status);
         goto error;
     }
 
-    // Update used ring with response length only (device only writes to iov[1])
-    update_used_ring(vq, desc_idx, iov[1].iov_len);
+    // Update used ring with actual bytes written, not the guest's buffer size
+    update_used_ring(vq, desc_idx, ctx.written);
     free(iov);
     free(flags);
     return 0;
 
 error:
+    if (desc_valid)
+        update_used_ring(vq, desc_idx, 0);
     free(iov);
     free(flags);
     return -EINVAL;
@@ -103,4 +162,11 @@ int virtio_scmi_txq_notify_handler(VirtIODevice *vdev, VirtQueue *vq) {
     }
     virtio_inject_irq(vq);
     return 0;
+}
+
+void virtio_scmi_close(VirtIODevice *vdev) {
+    SCMIDev *dev = vdev->dev;
+    scmi_dev_free(dev);
+    free(vdev->vqs);
+    free(vdev);
 }
