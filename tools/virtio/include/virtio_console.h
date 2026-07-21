@@ -28,6 +28,7 @@ typedef struct virtio_console_dev {
     int slave_keepalive_fd;
     int rx_ready;
     struct hvisor_event *event;
+    pthread_mutex_t rx_lock;
 } ConsoleDev;
 
 ConsoleDev *init_console_dev();

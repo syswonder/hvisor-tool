@@ -78,6 +78,23 @@ struct hvisor_event *add_event(int fd, int epoll_type,
     }
 }
 
+int rearm_event(struct hvisor_event *event) {
+    struct epoll_event eevent;
+
+    if (event == NULL || event->fd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    eevent.events = event->epoll_type;
+    eevent.data.ptr = event;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, event->fd, &eevent) < 0) {
+        log_error("failed to rearm fd %d, errno is %d", event->fd, errno);
+        return -1;
+    }
+    return 0;
+}
+
 // Create a thread monitoring events.
 int initialize_event_monitor() {
     epoll_fd = epoll_create1(0);
