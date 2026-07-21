@@ -112,7 +112,7 @@ union GicConfig {
 struct Uefi {
     __u64 memory_map_addr;
     __u64 memory_map_size;
-    __u64 sys_map_addr; 
+    __u64 sys_map_addr;
 };
 
 struct UefiPayload {
