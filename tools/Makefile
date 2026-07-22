@@ -1,4 +1,5 @@
-sources ?= $(wildcard *.c) $(wildcard ./virtio/*.c) ../cJSON/cJSON.c
+tool_sources := hvisor.c ivc_demo.c json_parse.c log.c rpmsg_demo.c safe_cjson.c
+sources ?= $(tool_sources) $(wildcard ./virtio/*.c) ../cJSON/cJSON.c
 
 # Include device-specific Makefiles
 include ./virtio/devices/blk/Makefile
@@ -41,7 +42,7 @@ ifneq ($(ROOT),)
 CFLAGS += --sysroot=$(ROOT)
 endif
 
-include_dirs := -I../include -I./include -I./virtio/include -I../cJSON
+include_dirs := -I../include -I./virtio/include -I./include -I../cJSON
 
 ifeq ($(LIBC), musl)
 include_dirs += -I./compat/

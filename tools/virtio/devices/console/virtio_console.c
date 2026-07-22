@@ -16,12 +16,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
 #include <termios.h>
-
-static uint8_t trashbuf[1024];
 
 ConsoleDev *init_console_dev() {
     ConsoleDev *dev = (ConsoleDev *)malloc(sizeof(ConsoleDev));
@@ -31,6 +30,7 @@ ConsoleDev *init_console_dev() {
     dev->slave_keepalive_fd = -1;
     dev->rx_ready = -1;
     dev->event = NULL;
+    pthread_mutex_init(&dev->rx_lock, NULL);
     return dev;
 }
 
@@ -43,6 +43,8 @@ static void virtio_console_event_handler(int fd, int epoll_type, void *param) {
     ssize_t len;
     struct iovec *iov = NULL;
     uint16_t idx;
+    bool used_buffer = false;
+    bool descriptor_error = false;
 
     if (fd != dev->master_fd || !(epoll_type & EPOLLIN)) {
         log_error("Invalid console event");
@@ -52,13 +54,23 @@ static void virtio_console_event_handler(int fd, int epoll_type, void *param) {
         log_error("console event handler should not be called");
         return;
     }
+
+    pthread_mutex_lock(&dev->rx_lock);
     if (dev->rx_ready <= 0) {
-        read(dev->master_fd, trashbuf, sizeof(trashbuf));
+        log_debug(
+            "console RX paused until the guest enables its receive queue");
+        pthread_mutex_unlock(&dev->rx_lock);
+        return;
+    }
+    if (vq->used_ring == NULL || vq->avail_ring == NULL) {
+        log_debug(
+            "console RX paused until the guest configures its receive queue");
+        pthread_mutex_unlock(&dev->rx_lock);
         return;
     }
     if (virtqueue_is_empty(vq)) {
-        read(dev->master_fd, trashbuf, sizeof(trashbuf));
-        virtio_inject_irq(vq);
+        log_debug("console RX paused until the guest posts a receive buffer");
+        pthread_mutex_unlock(&dev->rx_lock);
         return;
     }
 
@@ -66,10 +78,11 @@ static void virtio_console_event_handler(int fd, int epoll_type, void *param) {
         n = process_descriptor_chain(vq, &idx, &iov, NULL, 0, false);
         if (n < 1) {
             log_error("process_descriptor_chain failed");
+            descriptor_error = true;
             break;
         }
         len = readv(dev->master_fd, iov, n);
-        if (len < 0 && errno == EWOULDBLOCK) {
+        if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             log_debug("no more bytes");
             vq->last_avail_idx--;
             free(iov);
@@ -81,9 +94,19 @@ static void virtio_console_event_handler(int fd, int epoll_type, void *param) {
             break;
         }
         update_used_ring(vq, idx, len);
+        used_buffer = true;
         free(iov);
     }
-    virtio_inject_irq(vq);
+
+    if (!descriptor_error && !virtqueue_is_empty(vq) &&
+        rearm_event(dev->event) < 0) {
+        log_error("failed to rearm console RX event");
+    }
+    pthread_mutex_unlock(&dev->rx_lock);
+
+    if (used_buffer) {
+        virtio_inject_irq(vq);
+    }
     return;
 }
 
@@ -138,8 +161,8 @@ int virtio_console_init(VirtIODevice *vdev) {
         return -1;
     }
 
-    dev->event =
-        add_event(dev->master_fd, EPOLLIN, virtio_console_event_handler, vdev);
+    dev->event = add_event(dev->master_fd, EPOLLIN | EPOLLONESHOT,
+                           virtio_console_event_handler, vdev);
 
     if (dev->event == NULL) {
         log_error("Can't register console event");
@@ -159,10 +182,16 @@ int virtio_console_init(VirtIODevice *vdev) {
 int virtio_console_rxq_notify_handler(VirtIODevice *vdev, VirtQueue *vq) {
     log_debug("%s", __func__);
     ConsoleDev *dev = (ConsoleDev *)vdev->dev;
+
+    pthread_mutex_lock(&dev->rx_lock);
     if (dev->rx_ready <= 0) {
         dev->rx_ready = 1;
         virtqueue_disable_notify(vq);
     }
+    if (!virtqueue_is_empty(vq) && rearm_event(dev->event) < 0) {
+        log_error("failed to resume console RX event");
+    }
+    pthread_mutex_unlock(&dev->rx_lock);
     return 0;
 }
 
@@ -209,6 +238,7 @@ void virtio_console_close(VirtIODevice *vdev) {
     if (dev->slave_keepalive_fd >= 0) {
         close(dev->slave_keepalive_fd);
     }
+    pthread_mutex_destroy(&dev->rx_lock);
     free(dev->event);
     free(dev);
     free(vdev->vqs);
