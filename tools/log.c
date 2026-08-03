@@ -65,7 +65,7 @@ void log_log(int level, const char *file, int line, const char *fmt, ...) {
     char buf[2048];
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    syslog(syslog_levels[level], "%s:%d: %s", file, line, buf);
+    syslog(level, "%s:%d: %s", file, line, buf);
 }
 
 void multithread_log_init() {
