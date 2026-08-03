@@ -350,7 +350,8 @@ static int parse_arch_config(cJSON *root, zone_config_t *config) {
     }
     if (memory_map_addr_json == NULL) {
         arch_config->uefi_config.no_uefi_tag = 1;
-        log_info("No Uefi —— This is a normal phenomenon. Currently, hvisor "
+        log_info("No Uefi Config found. This is a normal phenomenon. "
+                 "Currently, hvisor "
                  "nonroot only supports legacy.\n");
     } else {
         CHECK_JSON_NULL(memory_map_addr_json, "memory_map_addr");
