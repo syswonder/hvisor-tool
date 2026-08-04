@@ -12,11 +12,11 @@
 #define _HVISOR_VIRTIO_GPU_H
 #ifdef ENABLE_VIRTIO_GPU
 
-#include "bits/pthreadtypes.h"
 #include "linux/types.h"
 #include "sys/queue.h"
 #include "virtio.h"
 #include <linux/virtio_gpu.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -193,6 +193,9 @@ typedef struct virtio_gpu_dev {
     pthread_cond_t gpu_cond;
     pthread_mutex_t queue_mutex;
     bool close;
+    bool thread_started;
+    bool cond_initialized;
+    bool mutex_initialized;
 } GPUDev;
 
 typedef struct virtio_gpu_control_cmd {

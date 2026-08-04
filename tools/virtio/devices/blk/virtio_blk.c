@@ -123,7 +123,12 @@ static void *blkproc_thread(void *arg) {
 
 // create blk dev.
 BlkDev *init_blk_dev(VirtIODevice *vdev) {
-    BlkDev *dev = malloc(sizeof(BlkDev));
+    BlkDev *dev = calloc(1, sizeof(BlkDev));
+    if (!dev) {
+        log_error("failed to allocate blk device");
+        return NULL;
+    }
+
     vdev->dev = dev;
     dev->config.capacity = -1;
     dev->config.size_max = -1;
@@ -131,11 +136,43 @@ BlkDev *init_blk_dev(VirtIODevice *vdev) {
     dev->img_fd = -1;
     dev->close = 0;
     // TODO: chang to thread poll
-    pthread_mutex_init(&dev->mtx, NULL);
-    pthread_cond_init(&dev->cond, NULL);
+    if (pthread_mutex_init(&dev->mtx, NULL) != 0) {
+        log_error("failed to init blk mutex");
+        free(dev);
+        vdev->dev = NULL;
+        return NULL;
+    }
+    dev->mutex_initialized = true;
+    if (pthread_cond_init(&dev->cond, NULL) != 0) {
+        log_error("failed to init blk cond");
+        pthread_mutex_destroy(&dev->mtx);
+        free(dev);
+        vdev->dev = NULL;
+        return NULL;
+    }
+    dev->cond_initialized = true;
     TAILQ_INIT(&dev->procq);
-    pthread_create(&dev->tid, NULL, blkproc_thread, vdev);
     return dev;
+}
+
+// Start the worker only after the backing image is opened successfully.
+int start_blk_worker(VirtIODevice *vdev) {
+    if (!vdev || !vdev->dev) {
+        log_error("invalid blk device");
+        return -1;
+    }
+
+    BlkDev *dev = vdev->dev;
+    if (dev->thread_started)
+        return 0;
+
+    if (pthread_create(&dev->tid, NULL, blkproc_thread, vdev) != 0) {
+        log_error("failed to create blk thread");
+        return -1;
+    }
+
+    dev->thread_started = true;
+    return 0;
 }
 
 int virtio_blk_init(VirtIODevice *vdev, const char *img_path) {
@@ -145,7 +182,6 @@ int virtio_blk_init(VirtIODevice *vdev, const char *img_path) {
     uint64_t blk_size;
     if (img_fd == -1) {
         log_error("cannot open %s, Error code is %d", img_path, errno);
-        close(img_fd);
         return -1;
     }
     if (fstat(img_fd, &st) == -1) {
@@ -158,8 +194,8 @@ int virtio_blk_init(VirtIODevice *vdev, const char *img_path) {
     dev->config.size_max = blk_size;
     dev->img_fd = img_fd;
     vdev->virtio_close = virtio_blk_close;
-    log_info("debug: virtio_blk_init: %s, size is %lld", img_path,
-             dev->config.capacity);
+    log_debug("virtio_blk_init: %s, size is %lld", img_path,
+              dev->config.capacity);
     return 0;
 }
 
@@ -246,16 +282,28 @@ int virtio_blk_notify_handler(VirtIODevice *vdev, VirtQueue *vq) {
 }
 
 void virtio_blk_close(VirtIODevice *vdev) {
+    if (!vdev)
+        return;
+
     BlkDev *dev = vdev->dev;
-    pthread_mutex_lock(&dev->mtx);
-    dev->close = 1;
-    pthread_cond_signal(&dev->cond);
-    pthread_mutex_unlock(&dev->mtx);
-    pthread_join(dev->tid, NULL);
-    pthread_mutex_destroy(&dev->mtx);
-    pthread_cond_destroy(&dev->cond);
-    close(dev->img_fd);
-    free(dev);
+    if (dev) {
+        if (dev->thread_started && dev->mutex_initialized &&
+            dev->cond_initialized) {
+            pthread_mutex_lock(&dev->mtx);
+            dev->close = 1;
+            pthread_cond_signal(&dev->cond);
+            pthread_mutex_unlock(&dev->mtx);
+            pthread_join(dev->tid, NULL);
+        }
+        if (dev->mutex_initialized)
+            pthread_mutex_destroy(&dev->mtx);
+        if (dev->cond_initialized)
+            pthread_cond_destroy(&dev->cond);
+        if (dev->img_fd >= 0)
+            close(dev->img_fd);
+        dev->img_fd = -1;
+        free(dev);
+    }
     free(vdev->vqs);
     free(vdev);
 }

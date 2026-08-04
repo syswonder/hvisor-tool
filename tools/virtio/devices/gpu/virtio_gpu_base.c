@@ -108,12 +108,13 @@ int virtio_gpu_init(VirtIODevice *vdev) {
         return -1;
     }
 
+    gdev->scanouts[0].card0_fd = drm_fd;
+
     // Get drm resources
     // Need to get the connector, CRTC, encoder, framebuffer of the device
     drmModeRes *res = drmModeGetResources(drm_fd);
     if (!res) {
         log_error("%s cannot get card0 resource", __func__);
-        close(drm_fd);
         return -1;
     }
 
@@ -121,45 +122,43 @@ int virtio_gpu_init(VirtIODevice *vdev) {
     drmModeConnector *connector = NULL;
     for (int i = 0; i < res->count_connectors; ++i) {
         connector = drmModeGetConnector(drm_fd, res->connectors[i]);
+        if (!connector)
+            continue;
         if (connector->connection == DRM_MODE_CONNECTED) {
             break;
         }
         drmModeFreeConnector(connector);
+        connector = NULL;
     }
 
-    if (!connector || connector->connection != DRM_MODE_CONNECTED) {
+    if (!connector || connector->connection != DRM_MODE_CONNECTED ||
+        connector->count_modes <= 0) {
         log_error("%s cannot find a connector", __func__);
         drmModeFreeResources(res);
-        close(drm_fd);
         return -1;
     }
+    gdev->scanouts[0].connector = connector;
 
     // Get encoder
     drmModeEncoder *encoder = drmModeGetEncoder(drm_fd, connector->encoder_id);
     if (!encoder) {
         log_error("%s cannot get encoder", __func__);
-        drmModeFreeConnector(connector);
         drmModeFreeResources(res);
-        close(drm_fd);
         return -1;
     }
+    gdev->scanouts[0].encoder = encoder;
 
     // Get CRTC
     drmModeCrtc *crtc = drmModeGetCrtc(drm_fd, encoder->crtc_id);
     if (!crtc) {
         log_error("%s cannot get CRTC", __func__);
-        drmModeFreeEncoder(encoder);
-        drmModeFreeConnector(connector);
         drmModeFreeResources(res);
-        close(drm_fd);
         return -1;
     }
     // drmModeModeInfo mode = connector->modes[0];
 
-    gdev->scanouts[0].card0_fd = drm_fd;
     gdev->scanouts[0].crtc = crtc;
-    gdev->scanouts[0].connector = connector;
-    gdev->scanouts[0].encoder = encoder;
+    drmModeFreeResources(res);
 
     ///
     log_debug("%s set scanout[0] card0_fd %d", __func__, drm_fd);
@@ -177,30 +176,73 @@ int virtio_gpu_init(VirtIODevice *vdev) {
     gdev->scanouts[0].height = connector->modes[0].vdisplay;
 
     // async
-    pthread_create(&gdev->gpu_thread, NULL, virtio_gpu_handler, vdev);
-    pthread_cond_init(&gdev->gpu_cond, NULL);
-    pthread_mutex_init(&gdev->queue_mutex, NULL);
+    if (pthread_cond_init(&gdev->gpu_cond, NULL) != 0) {
+        log_error("%s failed to initialize gpu cond", __func__);
+        return -1;
+    }
+    gdev->cond_initialized = true;
+    if (pthread_mutex_init(&gdev->queue_mutex, NULL) != 0) {
+        log_error("%s failed to initialize gpu mutex", __func__);
+        pthread_cond_destroy(&gdev->gpu_cond);
+        gdev->cond_initialized = false;
+        return -1;
+    }
+    gdev->mutex_initialized = true;
+    if (pthread_create(&gdev->gpu_thread, NULL, virtio_gpu_handler, vdev) !=
+        0) {
+        log_error("%s failed to create gpu thread", __func__);
+        pthread_mutex_destroy(&gdev->queue_mutex);
+        pthread_cond_destroy(&gdev->gpu_cond);
+        gdev->mutex_initialized = false;
+        gdev->cond_initialized = false;
+        return -1;
+    }
+    gdev->thread_started = true;
 
     return 0;
 }
 
 void virtio_gpu_close(VirtIODevice *vdev) {
+    if (!vdev)
+        return;
+
     log_info("virtio_gpu close");
 
     // Reclaim memory related to scanouts
     GPUDev *gdev = (GPUDev *)vdev->dev;
+    if (!gdev) {
+        free(vdev->vqs);
+        free(vdev);
+        return;
+    }
+
+    // Reclaim async part before freeing queues and display resources.
+    if (gdev->thread_started && gdev->mutex_initialized &&
+        gdev->cond_initialized) {
+        pthread_mutex_lock(&gdev->queue_mutex);
+        gdev->close = true;
+        pthread_cond_signal(&gdev->gpu_cond);
+        pthread_mutex_unlock(&gdev->queue_mutex);
+        pthread_join(gdev->gpu_thread, NULL);
+    }
+
     for (int i = 0; i < gdev->scanouts_num; ++i) {
         free(gdev->scanouts[i].current_cursor);
+        gdev->scanouts[i].current_cursor = NULL;
 
         virtio_gpu_remove_drm_framebuffer(&gdev->scanouts[i]);
 
         drmModeFreeCrtc(gdev->scanouts[i].crtc);
+        gdev->scanouts[i].crtc = NULL;
         drmModeFreeEncoder(gdev->scanouts[i].encoder);
+        gdev->scanouts[i].encoder = NULL;
         drmModeFreeConnector(gdev->scanouts[i].connector);
+        gdev->scanouts[i].connector = NULL;
 
         // Release card0_fd
         if (gdev->scanouts[i].card0_fd != -1) {
             close(gdev->scanouts[i].card0_fd);
+            gdev->scanouts[i].card0_fd = -1;
         }
     }
 
@@ -208,6 +250,7 @@ void virtio_gpu_close(VirtIODevice *vdev) {
     while (!TAILQ_EMPTY(&gdev->resource_list)) {
         GPUSimpleResource *temp = TAILQ_FIRST(&gdev->resource_list);
         TAILQ_REMOVE(&gdev->resource_list, temp, next);
+        virtio_gpu_cleanup_mapping(gdev, temp);
         free(temp);
     }
 
@@ -215,15 +258,14 @@ void virtio_gpu_close(VirtIODevice *vdev) {
     while (!TAILQ_EMPTY(&gdev->command_queue)) {
         GPUCommand *temp = TAILQ_FIRST(&gdev->command_queue);
         TAILQ_REMOVE(&gdev->command_queue, temp, next);
+        free(temp->resp_iov);
         free(temp);
     }
 
-    // Reclaim async part
-    gdev->close = true;
-    pthread_cond_signal(&gdev->gpu_cond);
-    pthread_join(gdev->gpu_thread, NULL);
-    pthread_cond_destroy(&gdev->gpu_cond);
-    pthread_mutex_destroy(&gdev->queue_mutex);
+    if (gdev->mutex_initialized)
+        pthread_mutex_destroy(&gdev->queue_mutex);
+    if (gdev->cond_initialized)
+        pthread_cond_destroy(&gdev->gpu_cond);
 
     free(gdev);
     gdev = NULL;
