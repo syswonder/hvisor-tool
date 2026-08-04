@@ -88,6 +88,10 @@ typedef struct virtio_control_response {
 
 static int ctrl_fd = -1;
 static pthread_t ctrl_tid;
+static atomic_bool ctrl_running = false;
+static bool ctrl_thread_started;
+static pthread_mutex_t ctrl_client_lock = PTHREAD_MUTEX_INITIALIZER;
+static int ctrl_client_fd = -1;
 
 struct zone_mem_region {
     uintptr_t virt_addr;
@@ -1358,8 +1362,38 @@ int virtio_handle_req(volatile struct device_req *req) {
     return 0;
 }
 
+static void stop_virtio_control_server(void) {
+    int client_fd = -1;
+
+    if (!ctrl_thread_started && ctrl_fd < 0)
+        return;
+
+    atomic_store(&ctrl_running, false);
+
+    if (ctrl_fd >= 0)
+        shutdown(ctrl_fd, SHUT_RDWR);
+
+    pthread_mutex_lock(&ctrl_client_lock);
+    client_fd = ctrl_client_fd;
+    pthread_mutex_unlock(&ctrl_client_lock);
+    if (client_fd >= 0)
+        shutdown(client_fd, SHUT_RDWR);
+
+    if (ctrl_thread_started) {
+        pthread_join(ctrl_tid, NULL);
+        ctrl_thread_started = false;
+    }
+
+    if (ctrl_fd >= 0) {
+        close(ctrl_fd);
+        ctrl_fd = -1;
+    }
+    unlink(VIRTIO_CTRL_SOCKET_PATH);
+}
+
 void virtio_close() {
     log_warn("virtio devices will be closed");
+    stop_virtio_control_server();
     destroy_event_monitor();
     for (int i = 0; i < vdevs_num; i++)
         vdevs[i]->virtio_close(vdevs[i]);
@@ -1378,12 +1412,6 @@ void virtio_close() {
     if (epoll_fd >= 0) {
         close(epoll_fd);
         epoll_fd = -1;
-    }
-
-    if (ctrl_fd >= 0) {
-        close(ctrl_fd);
-        ctrl_fd = -1;
-        unlink(VIRTIO_CTRL_SOCKET_PATH);
     }
 
     munmap((void *)virtio_bridge, MMAP_SIZE);
@@ -2388,19 +2416,35 @@ static void handle_control_client(int client_fd) {
 static void *virtio_control_loop(void *arg) {
     (void)arg;
 
-    for (;;) {
+    while (atomic_load(&ctrl_running)) {
         int client_fd = accept(ctrl_fd, NULL, NULL);
         if (client_fd < 0) {
             if (errno == EINTR)
                 continue;
-            if (ctrl_fd < 0)
+            if (!atomic_load(&ctrl_running) &&
+                (errno == EINVAL || errno == EBADF || errno == ENOTSOCK))
                 break;
             log_error("accept virtio control client failed, errno is %d",
                       errno);
             continue;
         }
 
+        pthread_mutex_lock(&ctrl_client_lock);
+        if (!atomic_load(&ctrl_running)) {
+            pthread_mutex_unlock(&ctrl_client_lock);
+            shutdown(client_fd, SHUT_RDWR);
+            close(client_fd);
+            break;
+        }
+        ctrl_client_fd = client_fd;
+        pthread_mutex_unlock(&ctrl_client_lock);
+
         handle_control_client(client_fd);
+
+        pthread_mutex_lock(&ctrl_client_lock);
+        if (ctrl_client_fd == client_fd)
+            ctrl_client_fd = -1;
+        pthread_mutex_unlock(&ctrl_client_lock);
         close(client_fd);
     }
 
@@ -2410,6 +2454,7 @@ static void *virtio_control_loop(void *arg) {
 static int start_virtio_control_server(void) {
     struct sockaddr_un addr;
 
+    atomic_store(&ctrl_running, false);
     mkdir("/run", 0755);
     unlink(VIRTIO_CTRL_SOCKET_PATH);
 
@@ -2439,15 +2484,20 @@ static int start_virtio_control_server(void) {
         return -1;
     }
 
+    pthread_mutex_lock(&ctrl_client_lock);
+    ctrl_client_fd = -1;
+    pthread_mutex_unlock(&ctrl_client_lock);
+    atomic_store(&ctrl_running, true);
     if (pthread_create(&ctrl_tid, NULL, virtio_control_loop, NULL) != 0) {
         log_error("create virtio control thread failed");
+        atomic_store(&ctrl_running, false);
         close(ctrl_fd);
         ctrl_fd = -1;
         unlink(VIRTIO_CTRL_SOCKET_PATH);
         return -1;
     }
 
-    pthread_detach(ctrl_tid);
+    ctrl_thread_started = true;
     return 0;
 }
 
