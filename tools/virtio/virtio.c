@@ -269,6 +269,11 @@ static void destroy_unpublished_virtio_device(VirtIODevice *vdev) {
         free(vdev);
         break;
 #endif
+    case VirtioTSCMI:
+        free(vdev->dev);
+        free(vdev->vqs);
+        free(vdev);
+        break;
     default:
         free(vdev->vqs);
         free(vdev);
@@ -370,7 +375,10 @@ create_virtio_device_unpublished(VirtioDeviceType dev_type, uint32_t zone_id,
 #ifdef ENABLE_VIRTIO_SCMI
         vdev->regs.dev_feature = SCMI_SUPPORTED_FEATURES;
         vdev->dev = init_scmi_dev();
-        init_virtio_queue(vdev, dev_type);
+        if (!vdev->dev)
+            goto err;
+        if (init_virtio_queue(vdev, dev_type) != 0)
+            goto err;
         is_err = 0;
 #else
         log_error("virtio-scmi is not enabled");
@@ -506,6 +514,8 @@ int init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
 #ifdef ENABLE_VIRTIO_SCMI
         vdev->vqs_len = SCMI_MAX_QUEUES;
         vqs = malloc(sizeof(VirtQueue) * SCMI_MAX_QUEUES);
+        if (!vqs)
+            goto err;
         for (int i = 0; i < SCMI_MAX_QUEUES; ++i) {
             virtqueue_reset(vqs, i);
             vqs[i].queue_num_max = VIRTQUEUE_SCMI_MAX_SIZE;
@@ -515,6 +525,7 @@ int init_virtio_queue(VirtIODevice *vdev, VirtioDeviceType type) {
         vdev->vqs = vqs;
 #else
         log_error("virtio scmi is not enabled");
+        return -1;
 #endif
         break;
 
