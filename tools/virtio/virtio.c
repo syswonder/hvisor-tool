@@ -1398,7 +1398,6 @@ void handle_virtio_requests(void) {
     int signal_count = 0, proc_count = 0;
     struct epoll_event events[16];
     while (true) {
-#ifndef LOONGARCH64
         log_debug("signal_count is %d, proc_count is %d", signal_count,
                   proc_count);
 
@@ -1428,14 +1427,11 @@ void handle_virtio_requests(void) {
                 if (read(efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {
                     continue;
                 }
-#endif
 
                 // Process all pending requests until the ring is empty
                 proc_count += consume_pending_requests();
-#ifndef LOONGARCH64
             }
         }
-#endif
     }
 }
 
