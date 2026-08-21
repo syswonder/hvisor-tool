@@ -1399,7 +1399,8 @@ void handle_virtio_requests(void) {
     /*
      * Drain requests that may have arrived before the event loop became ready.
      * consume_pending_requests() also performs the sleep handshake: it sets
-     * need_wakeup, issues a full barrier, and rechecks the ring before returning.
+     * need_wakeup, issues a full barrier, and rechecks the ring before
+     * returning.
      */
     proc_count += consume_pending_requests();
 #else
