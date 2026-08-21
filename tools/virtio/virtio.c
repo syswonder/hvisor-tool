@@ -1391,12 +1391,22 @@ void handle_virtio_requests(void) {
         return;
     }
 
-    // Initial state: Mark backend as ready to receive notifications
-    __atomic_store_n(&virtio_bridge->need_wakeup, 1, memory_order_relaxed);
-
     log_info("virtio request handler loop started.");
     int signal_count = 0, proc_count = 0;
     struct epoll_event events[16];
+
+#ifdef LOONGARCH64
+    /*
+     * Drain requests that may have arrived before the event loop became ready.
+     * consume_pending_requests() also performs the sleep handshake: it sets
+     * need_wakeup, issues a full barrier, and rechecks the ring before returning.
+     */
+    proc_count += consume_pending_requests();
+#else
+    // Preserve the existing initialization behavior on other architectures.
+    __atomic_store_n(&virtio_bridge->need_wakeup, 1, memory_order_relaxed);
+#endif
+
     while (true) {
         log_debug("signal_count is %d, proc_count is %d", signal_count,
                   proc_count);
