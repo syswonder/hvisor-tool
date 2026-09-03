@@ -180,6 +180,7 @@ static int handle_power_state_set(SCMIDev *dev, uint16_t token,
     }
 
     struct hvisor_scmi_power_args args;
+    args.zone_id = dev->zone_id;
     args.u.power_state_info.domain_id = phys_id;
     args.u.power_state_info.power_state = power_state;
 

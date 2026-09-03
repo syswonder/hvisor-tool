@@ -134,6 +134,8 @@ struct hvisor_load_image_args {
 struct hvisor_scmi_clock_args {
     __u32 subcmd;   /* Subcommand ID */
     __u32 data_len; /* Length of data buffer */
+    __u32 zone_id;  /* Zone the request belongs to (for per-zone resource
+                     * accounting/lifecycle in the kernel driver) */
     union {
         __u32 clock_count; /* For GET_COUNT */
         struct {
@@ -192,6 +194,8 @@ struct hvisor_scmi_reset_args {
 struct hvisor_scmi_power_args {
     __u32 subcmd;   /* Subcommand ID */
     __u32 data_len; /* Length of data buffer */
+    __u32 zone_id;  /* Zone the request belongs to (for per-zone resource
+                     * accounting/lifecycle in the kernel driver) */
     union {
         __u32 power_count; /* For GET_COUNT */
         struct {
