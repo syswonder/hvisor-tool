@@ -1,5 +1,6 @@
 #include "hvisor.h"
 #include "server.h"
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
@@ -15,6 +16,69 @@ struct power_domain_dev {
 
 static struct power_domain_dev *power_devices;
 static u32 power_max_num;
+
+/* Per-zone power-on accounting (see clock.c for rationale). */
+static u32 **pwr_zone_on;
+static DEFINE_MUTEX(power_zone_lock);
+
+static int power_domain_state_set(u32 domain_id, u32 power_state);
+
+static u32 *power_zone_row(u32 zone) {
+    u32 *row;
+
+    if (zone >= SCMI_MAX_ZONES || power_max_num == 0)
+        return NULL;
+    row = pwr_zone_on ? pwr_zone_on[zone] : NULL;
+    if (!row) {
+        row = kcalloc(power_max_num, sizeof(u32), GFP_KERNEL);
+        if (!row)
+            return NULL;
+        if (!pwr_zone_on) {
+            pwr_zone_on = kcalloc(SCMI_MAX_ZONES, sizeof(u32 *), GFP_KERNEL);
+            if (!pwr_zone_on) {
+                kfree(row);
+                return NULL;
+            }
+        }
+        pwr_zone_on[zone] = row;
+    }
+    return row;
+}
+
+void power_zone_adjust(u32 zone, u32 domain, bool on) {
+    u32 *row;
+
+    mutex_lock(&power_zone_lock);
+    row = power_zone_row(zone);
+    if (row && domain < power_max_num) {
+        if (on)
+            row[domain]++;
+        else if (row[domain] > 0)
+            row[domain]--;
+    }
+    mutex_unlock(&power_zone_lock);
+}
+
+void power_zone_release(u32 zone) {
+    u32 *row;
+    u32 domain;
+
+    mutex_lock(&power_zone_lock);
+    row = (zone < SCMI_MAX_ZONES && pwr_zone_on) ? pwr_zone_on[zone] : NULL;
+    if (!row) {
+        mutex_unlock(&power_zone_lock);
+        return;
+    }
+    for (domain = 0; domain < power_max_num; domain++) {
+        while (row[domain] > 0) {
+            if (power_domain_state_set(domain, SCMI_POWER_STATE_GENERIC_OFF) !=
+                0)
+                break;
+            row[domain]--;
+        }
+    }
+    mutex_unlock(&power_zone_lock);
+}
 
 /* Control platform device - carrier for the hvisor DT node */
 static struct platform_device *ctrl_pdev;
@@ -102,6 +166,14 @@ void power_ctrl_finish(void) {
         kfree(power_devices);
         power_devices = NULL;
         power_max_num = 0;
+    }
+    if (pwr_zone_on) {
+        u32 z;
+
+        for (z = 0; z < SCMI_MAX_ZONES; z++)
+            kfree(pwr_zone_on[z]);
+        kfree(pwr_zone_on);
+        pwr_zone_on = NULL;
     }
 
     if (ctrl_pdev) {
@@ -225,8 +297,13 @@ int hvisor_scmi_power_ioctl(struct hvisor_scmi_power_args __user *user_args) {
         if (ret < 0)
             return ret;
 
-        return power_domain_state_set(domain_id,
-                                      args.u.power_state_info.power_state);
+        ret = power_domain_state_set(domain_id,
+                                     args.u.power_state_info.power_state);
+        if (ret == 0)
+            power_zone_adjust(args.zone_id, domain_id,
+                              args.u.power_state_info.power_state ==
+                                  SCMI_POWER_STATE_GENERIC_ON);
+        return ret;
     }
     case HVISOR_SCMI_POWER_STATE_GET: {
         u32 domain_id = args.u.power_state_info.domain_id;
