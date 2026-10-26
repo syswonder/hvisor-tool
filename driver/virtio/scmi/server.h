@@ -31,4 +31,17 @@ int hvisor_scmi_power_ioctl(struct hvisor_scmi_power_args __user *user_args);
 /* Cleanup — called from hvisor_exit() to release SCMI resources */
 void hvisor_scmi_cleanup(void);
 
+/* Per-zone lifecycle (kernel owns it: the driver executes the clk/pd ops
+ * and sees zone start/shutdown synchronously). */
+#define SCMI_MAX_ZONES 16
+
+/* Record that zone @zone enabled/disabled clock @clk (enable=true -> +1). */
+void clock_zone_adjust(u32 zone, u32 clk, bool enable);
+/* Record that zone @zone powered @domain on/off (on=true -> +1). */
+void power_zone_adjust(u32 zone, u32 domain, bool on);
+/* Undo everything zone @zone recorded: disable its clocks, then power off
+ * its domains. Idempotent; safe to call before a zone starts (any recorded
+ * state then belongs to a dead instance) and after it is shut down. */
+void scmi_release_zone(u32 zone);
+
 #endif /* _HVISOR_SCMI_SERVER_H */

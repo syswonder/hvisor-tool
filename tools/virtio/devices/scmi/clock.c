@@ -459,6 +459,7 @@ static int handle_clock_config_set(SCMIDev *dev, uint16_t token,
     struct hvisor_scmi_clock_args args;
     struct clock_config_info *config_info =
         (struct clock_config_info *)&args.u.data;
+    args.zone_id = dev->zone_id;
     config_info->clock_id = phys_id;
     config_info->config = r->attributes;
 

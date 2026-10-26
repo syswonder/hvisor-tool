@@ -344,6 +344,8 @@ static long hvisor_ioctl(struct file *file, unsigned int ioctl,
         break;
     case HVISOR_ZONE_SHUTDOWN:
         err = hvisor_call(HVISOR_HC_SHUTDOWN_ZONE, arg, 0);
+        if (err == 0)
+            scmi_release_zone((u32)arg);
         break;
     case HVISOR_ZONE_LIST:
         err = hvisor_zone_list((zone_list_args_t __user *)arg);

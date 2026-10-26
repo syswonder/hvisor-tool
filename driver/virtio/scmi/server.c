@@ -21,6 +21,16 @@ void hvisor_put_node(void) {
 extern void clock_ctrl_finish(void);
 extern void reset_ctrl_finish(void);
 extern void power_ctrl_finish(void);
+extern void clock_zone_release(u32 zone);
+extern void power_zone_release(u32 zone);
+
+void scmi_release_zone(u32 zone) {
+    /* Clocks first (stops scanout/DMA, removing the stale-interrupt source),
+     * then power off the domains (the hardware reset). */
+    clock_zone_release(zone);
+    power_zone_release(zone);
+    pr_info("hvisor.ko: released scmi resources of zone %u\n", zone);
+}
 
 int hvisor_scmi_init(void) {
     int ret;
