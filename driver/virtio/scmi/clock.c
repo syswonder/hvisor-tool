@@ -1,6 +1,7 @@
 #include "hvisor.h"
 #include "server.h"
 #include <linux/clk.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -10,6 +11,74 @@ extern const char *__clk_get_name(const struct clk *clk);
 
 static struct clk **clock_cache;
 static u32 clock_max_num;
+
+/* Per-zone enable accounting: clk_zone_en[zone][clock_id] counts how many
+ * times zone @zone enabled clock @clock_id through SCMI (rows allocated
+ * lazily). The kernel driver owns this state because it executes the clk
+ * ops and sees zone start/shutdown; zone shutdown / next zone start undo
+ * exactly the zone's own contributions. */
+static u32 **clk_zone_en;
+static DEFINE_MUTEX(clock_zone_lock);
+
+static struct clk *clock_get_cached(u32 clock_id);
+
+static u32 *clock_zone_row(u32 zone) {
+    u32 *row;
+
+    if (zone >= SCMI_MAX_ZONES || clock_max_num == 0)
+        return NULL;
+    row = clk_zone_en ? clk_zone_en[zone] : NULL;
+    if (!row) {
+        row = kcalloc(clock_max_num, sizeof(u32), GFP_KERNEL);
+        if (!row)
+            return NULL;
+        if (!clk_zone_en) {
+            clk_zone_en = kcalloc(SCMI_MAX_ZONES, sizeof(u32 *), GFP_KERNEL);
+            if (!clk_zone_en) {
+                kfree(row);
+                return NULL;
+            }
+        }
+        clk_zone_en[zone] = row;
+    }
+    return row;
+}
+
+void clock_zone_adjust(u32 zone, u32 clk, bool enable) {
+    u32 *row;
+
+    mutex_lock(&clock_zone_lock);
+    row = clock_zone_row(zone);
+    if (row && clk < clock_max_num) {
+        if (enable)
+            row[clk]++;
+        else if (row[clk] > 0)
+            row[clk]--;
+    }
+    mutex_unlock(&clock_zone_lock);
+}
+
+void clock_zone_release(u32 zone) {
+    u32 *row;
+    u32 clk;
+
+    mutex_lock(&clock_zone_lock);
+    row = (zone < SCMI_MAX_ZONES && clk_zone_en) ? clk_zone_en[zone] : NULL;
+    if (!row) {
+        mutex_unlock(&clock_zone_lock);
+        return;
+    }
+    for (clk = 0; clk < clock_max_num; clk++) {
+        while (row[clk] > 0) {
+            struct clk *c = clock_get_cached(clk);
+            if (IS_ERR(c))
+                break;
+            clk_disable_unprepare(c);
+            row[clk]--;
+        }
+    }
+    mutex_unlock(&clock_zone_lock);
+}
 
 int clock_init(void) {
     struct device_node *np;
@@ -161,6 +230,14 @@ void clock_ctrl_finish(void) {
     }
 
 out:
+    if (clk_zone_en) {
+        u32 z;
+
+        for (z = 0; z < SCMI_MAX_ZONES; z++)
+            kfree(clk_zone_en[z]);
+        kfree(clk_zone_en);
+        clk_zone_en = NULL;
+    }
     kfree(clock_cache);
     clock_cache = NULL;
     clock_max_num = 0;
@@ -230,9 +307,15 @@ int hvisor_scmi_clock_ioctl(struct hvisor_scmi_clock_args __user *user_args) {
             return -EFAULT;
         return 0;
     }
-    case HVISOR_SCMI_CLOCK_CONFIG_SET:
-        return set_clock_config(args.u.clock_config_info.clock_id,
-                                args.u.clock_config_info.config);
+    case HVISOR_SCMI_CLOCK_CONFIG_SET: {
+        u32 clk = args.u.clock_config_info.clock_id;
+        u32 cfg = args.u.clock_config_info.config;
+        int r = set_clock_config(clk, cfg);
+
+        if (r == 0)
+            clock_zone_adjust(args.zone_id, clk, cfg & 1);
+        return r;
+    }
     case HVISOR_SCMI_CLOCK_NAME_GET: {
         char name[64];
         int ret = get_clock_name(args.u.clock_name_info.clock_id, name);
