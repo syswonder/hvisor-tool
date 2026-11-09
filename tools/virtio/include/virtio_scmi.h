@@ -149,6 +149,12 @@ struct virtio_scmi_config {
 
 typedef struct virtio_scmi_dev {
     struct virtio_scmi_config config;
+
+    /* Zone this device serves; stamped on every scmi ioctl so the kernel
+     * driver can account resources per zone and release them when the zone
+     * is (re)started or shut down. */
+    uint32_t zone_id;
+
     uint32_t *clock_ids; /* NULL = protocol not supported */
     uint32_t clock_count;
     uint32_t *reset_ids;

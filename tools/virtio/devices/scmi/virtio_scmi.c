@@ -247,6 +247,7 @@ static int virtio_scmi_do_init(VirtIODevice *vdev,
             return -ENOMEM;
         vdev->dev = dev;
     }
+    dev->zone_id = vdev->zone_id;
 
     return 0;
 }
